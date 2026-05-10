@@ -1,0 +1,16 @@
+[project]
+name = "aicat-backend"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "openai",
+    "aiosqlite",
+    "tiktoken",
+    "pydantic",
+    "pydantic-settings",
+]
+
+[tool.fastapi]
+entrypoint = "app.main:app"
