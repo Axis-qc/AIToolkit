@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated
 
 import tiktoken
@@ -24,19 +25,7 @@ client = AsyncOpenAI(
 
 enc = tiktoken.get_encoding("cl100k_base")
 
-SYSTEM_PROMPT = """你是一个具备长期记忆的 AI 助手。你的记忆以知识图谱形式存储，以用户为中心展开。
-
-工具使用规则：
-1. 每收到用户消息，必须先调用 search_memory 检索相关记忆。即使你认为不需要，也必须调用。
-2. 基于检索到的记忆和当前对话，给出个性化回复。如果记忆与当前话题无关，如实告知并正常回复。
-3. 发现值得长期记忆的内容时，调用 save_to_graph 写入图谱。
-4. 图谱中所有信息以用户为中心。关系类型自行用简洁动词命名。
-
-文件操作规则：
-5. 你可以读写项目白名单目录内的文件。修改文件前先用 search_files 和 search_content 了解代码结构。
-6. 编辑文件使用 edit_file（精确字符串替换），创建新文件用 write_file。
-7. 修改代码后可用 run_command 运行构建/测试/检查确认正确性。
-8. 命令执行默认在项目根目录，超时 60 秒。不要在工具返回结果后发问，直接继续行动。"""
+SYSTEM_PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "chat_system.txt").read_text(encoding="utf-8")
 
 MAIN_CONV_ID = "main"
 CONTEXT_LIMIT = 200000
@@ -110,96 +99,140 @@ async def chat(req: Annotated[ChatRequest, Body()]) -> StreamingResponse:
             yield f"data: {json.dumps({'type': 'archived', 'archived_id': archived_id, 'title': archived_title})}\n\n"
 
         current_messages = messages
+
+        # === 自动检索记忆并注入上下文 ===
+        last_user_msg = ""
+        last_user_idx = -1
+        for i in range(len(current_messages) - 1, -1, -1):
+            if current_messages[i].get("role") == "user":
+                last_user_msg = current_messages[i].get("content", "")
+                last_user_idx = i
+                break
+
+        if last_user_msg:
+            try:
+                memory_result = await memory.search(query=last_user_msg, top_k=15)
+                if memory_result and memory_result != "（未找到相关记忆）":
+                    memory_msg = {
+                        "role": "system",
+                        "content": "[记忆检索结果]\n" + memory_result,
+                    }
+                    current_messages.insert(last_user_idx, memory_msg)
+                    log.get().info(f"[记忆] 注入记忆梗概 ({len(memory_result)} 字符)")
+                    yield f"data: {json.dumps({'type': 'memory_context', 'content': memory_result})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'type': 'memory_context', 'content': ''})}\n\n"
+            except Exception as e:
+                log.get().warning(f"[记忆] 预检索失败，跳过注入: {e}")
+                yield f"data: {json.dumps({'type': 'memory_context', 'content': ''})}\n\n"
+
+        def _save_checkpoint():
+            now = datetime.now(timezone.utc).isoformat()
+            title = ""
+            saved = []
+            for m in current_messages[1:]:
+                entry = {**m, "timestamp": now}
+                saved.append(entry)
+                if not title and m["role"] == "user":
+                    title = m.get("content", "")[:30]
+            storage.save(conv_id, title, saved, archived=False, last_prompt_tokens=0)
+
         done = False
         round_num = 0
 
-        while not done:
-            round_num += 1
-            msg_count = len(current_messages)
-            log.get().info(f"[LLM] 第 {round_num} 轮 | model={settings.chat_model} | messages={msg_count}")
-            response = await client.chat.completions.create(
-                model=settings.chat_model,
-                messages=current_messages,
-                tools=TOOL_DEFINITIONS,
-                tool_choice="auto",
-                stream=True,
-            )
+        try:
+            while not done:
+                round_num += 1
+                msg_count = len(current_messages)
+                log.get().info(f"[LLM] 第 {round_num} 轮 | model={settings.chat_model} | messages={msg_count}")
+                response = await client.chat.completions.create(
+                    model=settings.chat_model,
+                    messages=current_messages,
+                    tools=TOOL_DEFINITIONS,
+                    tool_choice="auto",
+                    stream=True,
+                )
 
-            tool_calls = []
-            content_buffer = ""
-            reasoning_buffer = ""
+                tool_calls = []
+                content_buffer = ""
+                reasoning_buffer = ""
 
-            async for chunk in response:
-                delta = chunk.choices[0].delta
+                async for chunk in response:
+                    delta = chunk.choices[0].delta
 
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        if tc.index is None:
-                            continue
-                        while len(tool_calls) <= tc.index:
-                            tool_calls.append({"id": "", "name": "", "arguments": ""})
-                        if tc.id:
-                            tool_calls[tc.index]["id"] = tc.id
-                        if tc.function:
-                            if tc.function.name:
-                                tool_calls[tc.index]["name"] = tc.function.name
-                            if tc.function.arguments:
-                                tool_calls[tc.index]["arguments"] += tc.function.arguments
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            if tc.index is None:
+                                continue
+                            while len(tool_calls) <= tc.index:
+                                tool_calls.append({"id": "", "name": "", "arguments": ""})
+                            if tc.id:
+                                tool_calls[tc.index]["id"] = tc.id
+                            if tc.function:
+                                if tc.function.name:
+                                    tool_calls[tc.index]["name"] = tc.function.name
+                                if tc.function.arguments:
+                                    tool_calls[tc.index]["arguments"] += tc.function.arguments
 
-                if delta.content:
-                    content_buffer += delta.content
-                    yield f"data: {json.dumps({'type': 'token', 'content': delta.content})}\n\n"
+                    if delta.content:
+                        content_buffer += delta.content
+                        yield f"data: {json.dumps({'type': 'token', 'content': delta.content})}\n\n"
 
-                if getattr(delta, 'reasoning_content', None):
-                    reasoning_buffer += delta.reasoning_content
-                    yield f"data: {json.dumps({'type': 'reasoning', 'content': delta.reasoning_content})}\n\n"
+                    if getattr(delta, 'reasoning_content', None):
+                        reasoning_buffer += delta.reasoning_content
+                        yield f"data: {json.dumps({'type': 'reasoning', 'content': delta.reasoning_content})}\n\n"
 
-            if tool_calls:
-                assistant_msg = {
-                    "role": "assistant",
-                    "content": content_buffer or None,
-                    "tool_calls": [],
-                }
-                if reasoning_buffer:
-                    assistant_msg["reasoning_content"] = reasoning_buffer
-                for tc in tool_calls:
-                    if tc["name"]:
-                        assistant_msg["tool_calls"].append({
-                            "id": tc["id"],
-                            "type": "function",
-                            "function": {
-                                "name": tc["name"],
-                                "arguments": tc["arguments"],
-                            },
-                        })
-                        args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-                        args_preview = json.dumps(args, ensure_ascii=False)[:120]
-                        log.get().info(f"[工具] 调用 {tc['name']} | args={args_preview}")
-                        yield f"data: {json.dumps({'type': 'tool_call', 'name': tc['name'], 'arguments': args})}\n\n"
+                if tool_calls:
+                    assistant_msg = {
+                        "role": "assistant",
+                        "content": content_buffer or None,
+                        "tool_calls": [],
+                    }
+                    if reasoning_buffer:
+                        assistant_msg["reasoning_content"] = reasoning_buffer
+                    for tc in tool_calls:
+                        if tc["name"]:
+                            assistant_msg["tool_calls"].append({
+                                "id": tc["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": tc["name"],
+                                    "arguments": tc["arguments"],
+                                },
+                            })
+                            args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                            args_preview = json.dumps(args, ensure_ascii=False)[:120]
+                            log.get().info(f"[工具] 调用 {tc['name']} | args={args_preview}")
+                            yield f"data: {json.dumps({'type': 'tool_call', 'name': tc['name'], 'arguments': args})}\n\n"
 
-                current_messages.append(assistant_msg)
+                    current_messages.append(assistant_msg)
 
-                for tc in tool_calls:
-                    if tc["name"]:
-                        args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-                        result = await dispatch(tc["name"], args, conv_id=conv_id)
-                        result_preview = result[:120].replace("\n", " ")
-                        log.get().info(f"[工具] 结果 {tc['name']} | {result_preview}")
-                        yield f"data: {json.dumps({'type': 'tool_result', 'tool_call_id': tc['id'], 'content': result})}\n\n"
-                        current_messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "content": result,
-                        })
-            else:
-                assistant_msg = {
-                    "role": "assistant",
-                    "content": content_buffer or None,
-                }
-                if reasoning_buffer:
-                    assistant_msg["reasoning_content"] = reasoning_buffer
-                current_messages.append(assistant_msg)
-                done = True
+                    for tc in tool_calls:
+                        if tc["name"]:
+                            args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                            result = await dispatch(tc["name"], args, conv_id=conv_id)
+                            result_preview = result[:120].replace("\n", " ")
+                            log.get().info(f"[工具] 结果 {tc['name']} | {result_preview}")
+                            yield f"data: {json.dumps({'type': 'tool_result', 'tool_call_id': tc['id'], 'content': result})}\n\n"
+                            current_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": result,
+                            })
+
+                    _save_checkpoint()
+                else:
+                    assistant_msg = {
+                        "role": "assistant",
+                        "content": content_buffer or None,
+                    }
+                    if reasoning_buffer:
+                        assistant_msg["reasoning_content"] = reasoning_buffer
+                    current_messages.append(assistant_msg)
+                    done = True
+                    _save_checkpoint()
+        finally:
+            _save_checkpoint()
 
         now = datetime.now(timezone.utc).isoformat()
         title = ""

@@ -1,4 +1,6 @@
 import json
+from datetime import datetime
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Body, HTTPException
@@ -24,23 +26,7 @@ client = AsyncOpenAI(
     base_url=settings.chat_base_url,
 )
 
-UPDATE_SYSTEM_PROMPT = """你需要深入审视以下完整对话，将值得长期记忆的内容写入知识图谱。
-
-处理步骤：
-1. 先调用 search_memory 检索与对话内容相关的已有记忆
-2. 提取并调用 save_to_graph 写入：
-   - 用户的新偏好、习惯、风格（type 用 preference）
-   - 用户提到的新事实、经历、计划（type 用 fact / event / plan）
-   - 用户学习的知识点及其关系（type 用 topic）
-   - 用户交代的待办事项（type 用 todo）
-3. 对比已有记忆，发现矛盾时记录 type=conflict 的 fact，描述新旧信息冲突
-4. 发现未解决问题、模糊表述、待跟进事项，记录 type=pending 的 fact
-5. 输出一句话核心综述
-
-注意：
-- 只保存用户明确表达的内容，不要推测
-- 不为琐碎的闲聊建立记忆
-- 关系命名用简洁的动词，如"学过""偏好""计划""经历"等"""
+UPDATE_SYSTEM_PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "graph_update.txt").read_text(encoding="utf-8")
 
 
 @router.post("/api/chat/update-graph")
@@ -63,6 +49,7 @@ async def update_graph(req: Annotated[UpdateGraphRequest, Body()]) -> UpdateGrap
     )
 
     summary = ""
+    steps = []
     msg = response.choices[0].message
 
     if msg.content:
@@ -71,14 +58,26 @@ async def update_graph(req: Annotated[UpdateGraphRequest, Body()]) -> UpdateGrap
     if msg.tool_calls:
         for tc in msg.tool_calls:
             args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-            await dispatch(tc.function.name, args, conv_id=req.conversation_id)
+            result = await dispatch(tc.function.name, args, conv_id=req.conversation_id)
+            steps.append({"name": tc.function.name, "args": args, "result": result})
 
     if not summary:
         summary = "已更新图谱"
 
-    await memory.mark_archived(req.conversation_id)
+    if req.conversation_id == "main":
+        msgs = data.get("messages", [])
+        if msgs:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archived_id = f"main_archive_{ts}"
+            archived_title = (data.get("title") or "对话") + " (归档)"
+            storage.save(archived_id, archived_title, msgs,
+                         archived=True, last_prompt_tokens=data.get("last_prompt_tokens", 0))
+            storage.clear("main")
+            await memory.mark_archived(archived_id)
+    else:
+        await memory.mark_archived(req.conversation_id)
 
-    return UpdateGraphResponse(success=True, summary=summary)
+    return UpdateGraphResponse(success=True, summary=summary, steps=steps)
 
 
 def format_history(messages: list[dict]) -> str:

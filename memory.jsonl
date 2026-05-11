@@ -1,0 +1,23 @@
+{"type":"entity","name":"AIChat项目","entityType":"project","observations":["全称「知识图谱 AI 对话系统」，基于 FastAPI(后端 18000) + Vue3/Vite(前端 15173) 的 AI 对话应用","后端使用 DeepSeek API，SSE 流式响应，function call 循环调度工具","知识图谱用 SQLite(aiosqlite) 存储，entities/relations/facts 三表","对话存档为 JSON 文件 (backend/data/conversations/main.json)","AI 工具包含：search_memory / save_to_graph / delete_from_graph / list_memory / 文件读写编辑 / search_files / search_content / run_command","前端状态管理：模块级 reactive ref，无 Pinia；HMR 通过 hot.dispose 持久化状态"]}
+{"type":"entity","name":"对话实时增量存档","entityType":"feature","observations":["后端 chat.py generate() 中定义 _save_checkpoint() 辅助函数","每轮 tool call 完成后调用 _save_checkpoint() 即时写入 main.json","对话完成(done=True)时调用 _save_checkpoint() 最终存档","finally 块调用 _save_checkpoint() 兜底——SSE 断开不丢数据","前端 ChatView.onMounted 自动 selectMainConversation() → loadMainMessages() → 读 main.json 恢复","存储层 storage.save() 支持增量覆盖写入"]}
+{"type":"entity","name":"系统提示词外置化","entityType":"feature","observations":["chat_system.txt: 对话系统主提示词，包含工具使用规则、记忆规则、文件操作规则","graph_update.txt: 归档时图谱更新提示词","存放于 backend/app/prompts/ 目录","Python 端通过 Path(__file__).parent.parent / 'prompts' / 'xxx.txt' 读取"]}
+{"type":"entity","name":"前端Token显示","entityType":"feature","observations":["聊天头部 ChatView.vue 显示：上下文 tokens + 输出 tokens = 合计 tokens","每条消息气泡底部显示 token 用量，用户消息按 content.length * 0.5 估算","ChatInput.vue 输入栏显示 contextTokens / 200,000 限额","store 新增 totalCompletionTokens computed，累计所有 completionTokens"]}
+{"type":"entity","name":"前端记忆展示","entityType":"feature","observations":["后端 SSE 发送 memory_context 事件，包含记忆检索结果","store 中 Message 接口加 memoryContext 字段","ChatWindow.vue 显示绿色边框 memory-block，展示检索到的相关记忆"]}
+{"type":"entity","name":"知识图谱重要性分级","entityType":"feature","observations":["entities 表加 importance(INTEGER 1-10 默认1) 和 pinned(INTEGER 0/1 默认0) 字段","bump_importance(): 每次 save_to_graph 涉及实体时 importance 自动 +1，上限 10","set_pinned(): 置顶时 importance 自动设为 10","set_importance(): 手动设置 1-10","save_to_graph 工具新增 importance 和 pinned 参数供 AI 调用","注入逻辑：全部 pinned 实体 + 全部关键词命中实体 → 按 importance 降序","upsert_entity 改为 ON CONFLICT 避免 REPLACE 覆盖已有重要性","get_all_graph / list_all_entities 返回 importance 和 pinned 信息"]}
+{"type":"entity","name":"记忆注入位置优化","entityType":"bugfix","observations":["修改前：记忆拼到 current_messages[0] 系统提示词尾部，AI 经常忽略","修改后：记忆作为独立 [system] 消息 insert 到用户消息前，紧贴用户问题","注入消息精简为纯记忆数据，不重复指令","文件路径：backend/app/api/chat.py generate() 函数"]}
+{"type":"entity","name":"中文关键词匹配修复","entityType":"bugfix","observations":["graph.py search_entities 中 query.lower().split() 只按空格分词","中文如 '我的爱好是什么' 变成单个长字符串，匹配不到短实体名","修复：所有匹配从单向 kw in name_lower → 双向 kw in name_lower or name_lower in kw","事实内容匹配同步修复","文件路径：backend/app/core/graph.py search_entities 函数"]}
+{"type":"entity","name":"存储空文件容错","entityType":"bugfix","observations":["main.json 空文件(0字节)导致 json.loads 抛异常，整个服务崩溃","修复 storage.load()：读取后 strip()，空则返回 None","修复 storage.clear()：空文件解析为空 dict 兜底","修复 list_all()：空文件跳过 continue","文件路径：backend/app/core/storage.py"]}
+{"type":"entity","name":"归档步骤可视化","entityType":"feature","observations":["后端 graph.py update_graph 返回 steps 数组，每个 step 包含 name/args/result","模型 chat.py GraphStep 模型，UpdateGraphResponse 加 steps 字段","前端 store archiveSteps ref，triggerArchive 后捕获结果","ChatWindow.vue 归档结果下方展示每一步的工具调用详情"]}
+{"type":"relation","from":"AIChat项目","to":"对话实时增量存档","relationType":"实现了"}
+{"type":"relation","from":"AIChat项目","to":"系统提示词外置化","relationType":"实现了"}
+{"type":"relation","from":"AIChat项目","to":"前端Token显示","relationType":"实现了"}
+{"type":"relation","from":"AIChat项目","to":"前端记忆展示","relationType":"实现了"}
+{"type":"relation","from":"AIChat项目","to":"知识图谱重要性分级","relationType":"实现了"}
+{"type":"relation","from":"AIChat项目","to":"归档步骤可视化","relationType":"实现了"}
+{"type":"relation","from":"AIChat项目","to":"记忆注入位置优化","relationType":"修复了"}
+{"type":"relation","from":"AIChat项目","to":"中文关键词匹配修复","relationType":"修复了"}
+{"type":"relation","from":"AIChat项目","to":"存储空文件容错","relationType":"修复了"}
+{"type":"relation","from":"知识图谱重要性分级","to":"中文关键词匹配修复","relationType":"依赖"}
+{"type":"relation","from":"记忆注入位置优化","to":"知识图谱重要性分级","relationType":"依赖"}
+{"type":"relation","from":"前端Token显示","to":"对话实时增量存档","relationType":"依赖"}
+{"type":"relation","from":"前端记忆展示","to":"记忆注入位置优化","relationType":"依赖"}

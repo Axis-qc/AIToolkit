@@ -4,7 +4,7 @@ import { RouterLink } from 'vue-router'
 import ChatWindow from '@/components/chat/ChatWindow.vue'
 import ChatInput from '@/components/chat/ChatInput.vue'
 import GraphCanvas from '@/components/graph/GraphCanvas.vue'
-import { archivedConversations, activeConvId, isReadonly, MAIN_CONV_ID, messages, error, send, fetchConversations, selectConversation, selectMainConversation, isStreaming } from '@/stores/chat'
+import { archivedConversations, activeConvId, isReadonly, MAIN_CONV_ID, messages, error, send, fetchConversations, selectConversation, selectMainConversation, isStreaming, contextTokens, totalCompletionTokens } from '@/stores/chat'
 
 const activeView = ref<'conversations' | 'memory' | 'settings'>('conversations')
 const sidebarHovered = ref(false)
@@ -111,6 +111,16 @@ onMounted(() => {
         <div class="chat-area">
           <header class="chat-header">
             <h2>{{ isReadonly ? (archivedConversations.find(c => c.id === activeConvId)?.title || '归档对话') : '知识图谱 AI 对话' }}</h2>
+            <div v-if="contextTokens > 0" class="chat-total-tokens">
+              <span class="total-label">上下文</span>
+              <span class="total-val">{{ contextTokens.toLocaleString() }}</span>
+              <span class="total-sep">+</span>
+              <span class="total-label">输出</span>
+              <span class="total-val">{{ totalCompletionTokens.toLocaleString() }}</span>
+              <span class="total-sep">=</span>
+              <span class="total-val total-sum">{{ (contextTokens + totalCompletionTokens).toLocaleString() }}</span>
+              <span class="total-label">tokens</span>
+            </div>
           </header>
           <ChatWindow />
           <ChatInput />
@@ -153,10 +163,12 @@ onMounted(() => {
   flex-shrink: 0;
   border-right: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(255, 255, 255, 0.015);
-  transition: width 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: width 0.18s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;
   padding: 0.75rem 0.5rem;
   gap: 0.5rem;
+  will-change: width;
+  contain: layout style;
 }
 
 .sidebar.expanded {
@@ -252,6 +264,8 @@ onMounted(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  contain: layout style;
+  overflow: hidden;
 }
 
 .conv-panel {
@@ -260,8 +274,10 @@ onMounted(() => {
   flex-shrink: 0;
   border-right: 1px solid transparent;
   background: rgba(255, 255, 255, 0.01);
-  transition: width 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: width 0.18s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;
+  will-change: width;
+  contain: layout style;
 }
 
 .conv-panel.expanded {
@@ -395,6 +411,32 @@ onMounted(() => {
   font-weight: 600;
   color: #d0d0dc;
   margin: 0;
+}
+
+.chat-total-tokens {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: 0.35rem;
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.total-label {
+  color: #404050;
+}
+
+.total-val {
+  color: #7c7c90;
+}
+
+.total-sep {
+  color: #303040;
+}
+
+.total-sum {
+  color: #a78bfa;
+  font-weight: 600;
 }
 
 .placeholder-view {

@@ -10,9 +10,16 @@ class UpdateGraphRequest(BaseModel):
     conversation_id: str
 
 
+class GraphStep(BaseModel):
+    name: str
+    args: dict
+    result: str
+
+
 class UpdateGraphResponse(BaseModel):
     success: bool
     summary: str
+    steps: list[GraphStep] = []
 
 
 class ConversationItem(BaseModel):

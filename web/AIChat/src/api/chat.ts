@@ -4,7 +4,7 @@ export interface ChatMessage {
 }
 
 export interface SSEEvent {
-  type: 'token' | 'reasoning' | 'tool_call' | 'tool_result' | 'done' | 'error' | 'archive_required' | 'archived'
+  type: 'token' | 'reasoning' | 'tool_call' | 'tool_result' | 'done' | 'error' | 'archive_required' | 'archived' | 'memory_context'
   content?: string
   name?: string
   arguments?: Record<string, unknown>
@@ -100,7 +100,7 @@ export async function deleteConversation(id: string): Promise<void> {
   await api(`/api/conversations/${id}`, { method: 'DELETE' })
 }
 
-export async function updateGraph(conversationId: string): Promise<{ success: boolean; summary: string }> {
+export async function updateGraph(conversationId: string): Promise<{ success: boolean; summary: string; steps: Array<{ name: string; args: Record<string, unknown>; result: string }> }> {
   const res = await api('/api/chat/update-graph', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

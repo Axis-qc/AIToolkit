@@ -4,15 +4,32 @@ from . import storage
 
 
 async def search(query: str, top_k: int = 5) -> str:
-    records = await graph.search_entities(query, top_k)
+    # 固定记忆 + 关键词匹配
+    pinned = await graph.get_pinned_entities()
+    keyword_results = await graph.search_entities(query, top_k)
 
-    if not records:
+    # 去重：已存在同名实体跳过
+    seen = set()
+    merged = []
+    for r in pinned:
+        if r["entity"] not in seen:
+            seen.add(r["entity"])
+            merged.append(r)
+    for r in keyword_results:
+        if r["entity"] not in seen:
+            seen.add(r["entity"])
+            merged.append(r)
+
+    if not merged:
         return "（未找到相关记忆）"
 
     lines = []
-    for row in records:
+    for row in merged:
         entity = row["entity"]
-        lines.append(f"## 关于 {entity}")
+        imp = row.get("importance", 1)
+        is_pinned = row.get("pinned", False)
+        pinned_mark = " [固定]" if is_pinned else ""
+        lines.append(f"## 关于 {entity} (重要度 {imp}/10){pinned_mark}")
         if row["user_relation"]:
             lines.append(f"- 你对此的态度：{row['user_relation']}")
         for fact in row.get("facts", []) or []:
@@ -29,12 +46,17 @@ async def search(query: str, top_k: int = 5) -> str:
     return "\n".join(lines)
 
 
-async def save(nodes: list[dict], relations: list[dict], facts: list[dict] | None = None, conv_id: str | None = None):
+async def save(nodes: list[dict], relations: list[dict], facts: list[dict] | None = None, conv_id: str | None = None, importance: int | None = None, pinned: bool | None = None):
     for node in nodes:
         name = node["name"]
         ntype = node["type"]
         props = node.get("properties", {})
         await graph.upsert_entity(name, ntype, props)
+        await graph.bump_importance(name)
+        if importance is not None:
+            await graph.set_importance(name, importance)
+        if pinned is not None:
+            await graph.set_pinned(name, pinned)
 
     for rel in relations:
         await graph.upsert_relation(
@@ -139,6 +161,65 @@ async def archive_conversation(conv_id: str):
             await dispatch(tc.function.name, args, conv_id=conv_id)
 
     await mark_archived(conv_id)
+
+
+async def delete_memory(target_type: str, target: str, rel_type: str | None = None) -> str:
+    """删除图谱中的记忆。target_type: entity | fact | relation"""
+    if target_type == "entity":
+        ok = await graph.delete_entity(target)
+        if ok:
+            return f"已删除实体「{target}」及其所有关联关系和事实"
+        return f"未找到实体「{target}」"
+    elif target_type == "fact":
+        try:
+            fact_id = int(target)
+        except ValueError:
+            return "错误：删除 fact 需要提供数字 ID"
+        ok = await graph.delete_fact(fact_id)
+        if ok:
+            return f"已删除事实 #{fact_id}"
+        return f"未找到事实 #{fact_id}"
+    elif target_type == "relation":
+        # target 格式: "from_name||to_name" 或 "from_name||to_name||rel_type"
+        parts = target.split("||")
+        if len(parts) < 2:
+            return "错误：删除 relation 需要 from_name||to_name 格式"
+        from_name, to_name = parts[0], parts[1]
+        rt = parts[2] if len(parts) > 2 else None
+        count = await graph.delete_relation(from_name, to_name, rt)
+        if count > 0:
+            return f"已删除 {count} 条关系"
+        return "未找到匹配的关系"
+    elif target_type == "fact_by_content":
+        # 根据内容关键词删除事实
+        facts = await graph.list_all_facts(500)
+        deleted = 0
+        for f in facts:
+            if target.lower() in f["content"].lower():
+                await graph.delete_fact(f["id"])
+                deleted += 1
+        if deleted > 0:
+            return f"已删除 {deleted} 条匹配的事实"
+        return "未找到匹配的事实"
+    else:
+        return f"未知的删除目标类型: {target_type}"
+
+
+async def list_memory(otype: str = "all") -> str:
+    """列出图谱中的内容，用于浏览。otype: entities | facts | all"""
+    lines = []
+    if otype in ("entities", "all"):
+        entities = await graph.list_all_entities()
+        lines.append(f"## 实体 ({len(entities)} 个)")
+        for e in entities:
+            lines.append(f"- [{e['type']}] {e['name']}")
+    if otype in ("facts", "all"):
+        facts = await graph.list_all_facts(100)
+        lines.append(f"## 事实 ({len(facts)} 条)")
+        for f in facts:
+            about = ", ".join(f["about_entities"]) if f["about_entities"] else "(无关联实体)"
+            lines.append(f"- #{f['id']} [{f['type']}] {f['content'][:80]} （关联: {about}）")
+    return "\n".join(lines) if lines else "图谱为空"
 
 
 async def delete_conversation(conv_id: str):

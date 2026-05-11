@@ -13,28 +13,36 @@ export interface Message {
   role: 'user' | 'assistant' | 'tool'
   content: string
   reasoning: string
+  memoryContext: string
   toolCalls: ToolCall[]
   isStreaming: boolean
   promptTokens: number
   completionTokens: number
 }
 
-let nextId = 0
+const hot = import.meta.hot
+const saved = (hot?.data ?? {}) as Record<string, unknown>
 
 export const MAIN_CONV_ID = "main"
 
-export const conversations = ref<ConversationItem[]>([])
-export const archivedConversations = ref<ConversationItem[]>([])
-export const activeConvId = ref<string | null>(null)
-export const isReadonly = ref(false)
-export const messages = ref<Message[]>([])
-export const isStreaming = ref(false)
-export const isArchiving = ref(false)
-export const archiveSummary = ref('')
-export const contextTokens = ref(0)
-export const error = ref<string | null>(null)
+export const conversations = (saved.conversations as ReturnType<typeof ref<ConversationItem[]>>) ?? ref<ConversationItem[]>([])
+export const archivedConversations = (saved.archivedConversations as ReturnType<typeof ref<ConversationItem[]>>) ?? ref<ConversationItem[]>([])
+export const activeConvId = (saved.activeConvId as ReturnType<typeof ref<string | null>>) ?? ref<string | null>(null)
+export const isReadonly = (saved.isReadonly as ReturnType<typeof ref<boolean>>) ?? ref(false)
+export const messages = (saved.messages as ReturnType<typeof ref<Message[]>>) ?? ref<Message[]>([])
+export const isStreaming = (saved.isStreaming as ReturnType<typeof ref<boolean>>) ?? ref(false)
+export const isArchiving = (saved.isArchiving as ReturnType<typeof ref<boolean>>) ?? ref(false)
+export const archiveSummary = (saved.archiveSummary as ReturnType<typeof ref<string>>) ?? ref('')
+export const archiveSteps = (saved.archiveSteps as ReturnType<typeof ref<Array<{ name: string; args: Record<string, unknown>; result: string }>>>) ?? ref<Array<{ name: string; args: Record<string, unknown>; result: string }>>([])
+export const contextTokens = (saved.contextTokens as ReturnType<typeof ref<number>>) ?? ref(0)
+export const totalCompletionTokens = computed(() =>
+  messages.value.reduce((sum, m) => sum + (m.completionTokens || 0), 0)
+)
+export const memoryContext = ref('')
+export const error = (saved.error as ReturnType<typeof ref<string | null>>) ?? ref<string | null>(null)
 
-let abortCtrl: AbortController | null = null
+let nextId: number = (saved.nextId as number | undefined) ?? 0
+let abortCtrl: AbortController | null = (saved.abortCtrl as AbortController | null) ?? null
 
 function addMessage(role: 'user' | 'assistant', content = ''): Message {
   const msg: Message = {
@@ -42,6 +50,7 @@ function addMessage(role: 'user' | 'assistant', content = ''): Message {
     role,
     content,
     reasoning: '',
+    memoryContext: '',
     toolCalls: [],
     isStreaming: role === 'assistant',
     promptTokens: 0,
@@ -60,20 +69,62 @@ export async function fetchConversations() {
   }
 }
 
+/** 从后端原始消息重建前端 Message，合并 tool 消息的结果到 assistant 的 toolCalls */
+function loadMessagesFromData(rawMessages: Array<Record<string, unknown>>): Message[] {
+  // 先建 tool_call_id → result 映射
+  const toolResults: Record<string, string> = {}
+  for (const m of rawMessages) {
+    if (m.role === 'tool' && m.tool_call_id) {
+      toolResults[m.tool_call_id as string] = (m.content as string) || ''
+    }
+  }
+
+  const result: Message[] = []
+  for (const m of rawMessages) {
+    if (m.role === 'tool') continue // tool 消息合并到 assistant 中，不单独渲染
+
+    const role = (m.role as string) === 'user' ? 'user' : 'assistant'
+
+    let toolCalls: ToolCall[] = []
+    if (Array.isArray(m.tool_calls)) {
+      toolCalls = (m.tool_calls as Array<Record<string, unknown>>).map(tc => {
+        const func = (tc.function || {}) as Record<string, unknown>
+        const name = (func.name as string) || ''
+        let args: Record<string, unknown> = {}
+        if (typeof func.arguments === 'string') {
+          try { args = JSON.parse(func.arguments) } catch { /* ignore */ }
+        } else if (func.arguments) {
+          args = func.arguments as Record<string, unknown>
+        }
+        return {
+          name,
+          arguments: args,
+          result: toolResults[tc.id as string] || undefined,
+          loading: false,
+        }
+      })
+    }
+
+    result.push({
+      id: ++nextId,
+      role,
+      content: (m.content as string) || '',
+      reasoning: (m as Record<string, string>).reasoning_content || '',
+      memoryContext: '',
+      toolCalls,
+      isStreaming: false,
+      promptTokens: Number((m as Record<string, unknown>).prompt_tokens) || 0,
+      completionTokens: Number((m as Record<string, unknown>).completion_tokens) || 0,
+    })
+  }
+  return result
+}
+
 export async function selectConversation(id: string) {
   if (isStreaming.value) return
   try {
     const data = await getConversation(id)
-    messages.value = data.messages.map((m, i) => ({
-      id: ++nextId,
-      role: m.role as 'user' | 'assistant',
-      content: m.content || '',
-      reasoning: (m as Record<string, string>).reasoning_content || '',
-      toolCalls: [],
-      isStreaming: false,
-      promptTokens: Number((m as Record<string, unknown>).prompt_tokens) || 0,
-      completionTokens: Number((m as Record<string, unknown>).completion_tokens) || 0,
-    }))
+    messages.value = loadMessagesFromData(data.messages as Array<Record<string, unknown>>)
     activeConvId.value = id
     isReadonly.value = id !== MAIN_CONV_ID
     error.value = null
@@ -93,16 +144,7 @@ export function selectMainConversation() {
 async function loadMainMessages() {
   try {
     const data = await getConversation(MAIN_CONV_ID)
-    messages.value = data.messages.map((m, i) => ({
-      id: ++nextId,
-      role: m.role as 'user' | 'assistant',
-      content: m.content || '',
-      reasoning: (m as Record<string, string>).reasoning_content || '',
-      toolCalls: [],
-      isStreaming: false,
-      promptTokens: Number((m as Record<string, unknown>).prompt_tokens) || 0,
-      completionTokens: Number((m as Record<string, unknown>).completion_tokens) || 0,
-    }))
+    messages.value = loadMessagesFromData(data.messages as Array<Record<string, unknown>>)
   } catch {
     // main conversation might not exist yet
   }
@@ -140,6 +182,7 @@ export async function triggerArchive(convId: string) {
   try {
     const result = await updateGraph(convId)
     archiveSummary.value = result.summary
+    archiveSteps.value = result.steps || []
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : '归档失败'
   } finally {
@@ -154,6 +197,7 @@ export async function send(content: string) {
 
   error.value = null
   archiveSummary.value = ''
+  archiveSteps.value = []
   const userMsg = addMessage('user', content)
   const assistantMsg = addMessage('assistant')
   isStreaming.value = true
@@ -211,6 +255,9 @@ export async function send(content: string) {
         case 'error':
           error.value = event.content || 'Unknown error'
           break
+        case 'memory_context':
+          assistantMsg.memoryContext = event.content || ''
+          break
         case 'done':
           assistantMsg.promptTokens = event.prompt_tokens || 0
           assistantMsg.completionTokens = event.completion_tokens || 0
@@ -236,4 +283,23 @@ export async function send(content: string) {
 
 export function stop() {
   abortCtrl?.abort()
+}
+
+if (hot) {
+  hot.accept()
+  hot.dispose(() => {
+    hot.data.conversations = conversations
+    hot.data.archivedConversations = archivedConversations
+    hot.data.activeConvId = activeConvId
+    hot.data.isReadonly = isReadonly
+    hot.data.messages = messages
+    hot.data.isStreaming = isStreaming
+    hot.data.isArchiving = isArchiving
+    hot.data.archiveSummary = archiveSummary
+    hot.data.archiveSteps = archiveSteps
+    hot.data.contextTokens = contextTokens
+    hot.data.error = error
+    hot.data.nextId = nextId
+    hot.data.abortCtrl = abortCtrl
+  })
 }

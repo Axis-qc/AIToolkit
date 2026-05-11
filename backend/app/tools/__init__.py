@@ -7,6 +7,7 @@ from . import edit_file as _edit
 from . import search_files as _glob
 from . import search_content as _grep
 from . import run_command as _bash
+from . import delete_from_graph as _delete
 
 TOOL_DEFINITIONS = [
     {
@@ -83,8 +84,58 @@ TOOL_DEFINITIONS = [
                             "required": ["content", "type"],
                         },
                     },
+                    "importance": {
+                        "type": "integer",
+                        "description": "手动设置实体重要度 1-10。常用记忆设高分，临时信息设低分。不传则自动 +1。",
+                    },
+                    "pinned": {
+                        "type": "boolean",
+                        "description": "是否固定注入到每次对话。设为 true 时重要度自动变为 10。",
+                    },
                 },
                 "required": ["nodes", "relations"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_from_graph",
+            "description": "从知识图谱中删除记忆。用于删除不相关、错误或测试用的实体/事实/关系。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_type": {
+                        "type": "string",
+                        "description": "删除目标类型: entity(实体,按名称), fact(事实,按ID), fact_by_content(按内容关键词匹配), relation(关系,格式 from_name||to_name)",
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "删除目标: entity填名称, fact填数字ID, fact_by_content填关键词, relation填 from_name||to_name",
+                    },
+                    "rel_type": {
+                        "type": "string",
+                        "description": "仅 relation 类型时可选，精确匹配关系类型",
+                    },
+                },
+                "required": ["target_type", "target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_memory",
+            "description": "列出知识图谱中所有实体和事实，用于浏览查找要删除的条目。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "otype": {
+                        "type": "string",
+                        "description": "列出类型: entities, facts, all(默认)",
+                    },
+                },
+                "required": [],
             },
         },
     },
@@ -250,6 +301,8 @@ async def dispatch(name: str, args: dict, conv_id: str | None = None) -> str:
                 relations=args.get("relations", []),
                 facts=args.get("facts"),
                 conv_id=conv_id,
+                importance=args.get("importance"),
+                pinned=args.get("pinned"),
             )
         elif name == "read_file":
             return await _read.read_file(
@@ -285,6 +338,16 @@ async def dispatch(name: str, args: dict, conv_id: str | None = None) -> str:
                 command=args["command"],
                 workdir=args.get("workdir"),
                 timeout=args.get("timeout", 60),
+            )
+        elif name == "delete_from_graph":
+            return await _delete.delete_from_graph(
+                target_type=args["target_type"],
+                target=args["target"],
+                rel_type=args.get("rel_type"),
+            )
+        elif name == "list_memory":
+            return await _delete.list_memory(
+                otype=args.get("otype", "all"),
             )
         else:
             return f"Unknown tool: {name}"

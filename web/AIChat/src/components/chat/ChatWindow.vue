@@ -1,9 +1,55 @@
 <script setup lang="ts">
 import { watch, nextTick, ref, computed, onMounted } from 'vue'
-import { messages, isStreaming, isArchiving, archiveSummary } from '@/stores/chat'
+import { messages, isStreaming, isArchiving, archiveSummary, archiveSteps } from '@/stores/chat'
+import FileDiffView from './FileDiffView.vue'
+import { marked } from 'marked'
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function renderMarkdown(content: string): string {
+  if (!content) return ''
+
+  // 如果整条消息是代码块，手动渲染（带 header 和行数）
+  const lines = content.split('\n')
+  const firstLine = lines[0] ?? ''
+  if (firstLine.startsWith('```') || content.startsWith('```')) {
+    const langMatch = firstLine.match(/^```(\S*)/)
+    const language = langMatch ? langMatch[1] : ''
+    const endIdx = lines.slice(1).findIndex(l => l.trim() === '```')
+    const codeLines = endIdx >= 0 ? lines.slice(1, endIdx + 1) : lines.slice(1)
+    const codeContent = codeLines.join('\n')
+    const lineCount = codeLines.length
+
+    return `<div class="direct-code-block">
+      <div class="code-block-header">
+        <span class="code-lang-tag">${escapeHtml(language || 'code')}</span>
+        <span class="code-line-count">${lineCount} 行</span>
+      </div>
+      <pre><code>${escapeHtml(codeContent)}</code></pre>
+    </div>`
+  }
+
+  // 否则走 marked 渲染
+  return marked.parse(content, { breaks: true }) as string
+}
+
+const FILE_TOOLS = new Set(['edit_file', 'write_file', 'read_file', 'search_files', 'search_content'])
+
+function isFileTool(name: string): boolean {
+  return FILE_TOOLS.has(name)
+}
 
 const containerRef = ref<HTMLElement | null>(null)
 const expandedReasoning = ref<Set<number>>(new Set())
+const collapsedTools = ref<Set<string>>(new Set())
+
+function toggleToolCollapse(msgId: number, idx: number) {
+  const key = `${msgId}-${idx}`
+  const s = collapsedTools.value
+  s.has(key) ? s.delete(key) : s.add(key)
+}
 
 const displayedMessages = computed(() => messages.value.slice(-100))
 
@@ -68,6 +114,11 @@ function toolArgsStr(args: Record<string, unknown>): string {
         :class="['message', msg.role]"
       >
         <div class="message-bubble">
+          <!-- Memory context -->
+          <div v-if="msg.memoryContext" class="memory-block">
+            <div class="memory-content">{{ msg.memoryContext }}</div>
+          </div>
+
           <!-- Reasoning (thinking process) -->
           <div v-if="msg.reasoning" class="reasoning-block">
             <button
@@ -96,21 +147,43 @@ function toolArgsStr(args: Record<string, unknown>): string {
               :key="i"
               :class="['tool-call', { loading: tc.loading, done: tc.result }]"
             >
-              <div class="tool-call-header">
+              <button
+                class="tool-call-header"
+                @click="toggleToolCollapse(msg.id, i)"
+                :title="collapsedTools.has(`${msg.id}-${i}`) ? '展开' : '折叠'"
+              >
                 <span class="tool-dot" />
                 <span class="tool-name">{{ tc.name }}</span>
                 <span v-if="tc.loading" class="tool-spinner" />
                 <span v-else-if="tc.result" class="tool-check">&#x2713;</span>
+                <span class="tool-chevron">{{ collapsedTools.has(`${msg.id}-${i}`) ? '▶' : '▼' }}</span>
+              </button>
+
+              <div v-if="!collapsedTools.has(`${msg.id}-${i}`)" class="tool-body">
+                <!-- File operations: render diff view -->
+                <FileDiffView
+                  v-if="isFileTool(tc.name)"
+                  :tool-name="tc.name"
+                  :args="tc.arguments"
+                  :result="tc.result"
+                />
+
+                <!-- Other tools: plain args + result -->
+                <template v-else>
+                  <div class="tool-args">{{ toolArgsStr(tc.arguments) }}</div>
+                  <div v-if="tc.result" class="tool-result">{{ tc.result }}</div>
+                </template>
               </div>
-              <div class="tool-args">{{ toolArgsStr(tc.arguments) }}</div>
-              <div v-if="tc.result" class="tool-result">{{ tc.result }}</div>
             </div>
           </div>
 
-          <div v-if="msg.content" class="msg-content" v-text="msg.content" />
+          <div v-if="msg.content" class="msg-content" v-html="renderMarkdown(msg.content)" />
           <div v-else-if="!msg.isStreaming" class="msg-empty">(empty response)</div>
           <div v-if="msg.role === 'assistant' && (msg.promptTokens || msg.completionTokens)" class="msg-tokens">
             {{ (msg.promptTokens + msg.completionTokens).toLocaleString() }} tokens
+          </div>
+          <div v-else-if="msg.role === 'user' && msg.content" class="msg-tokens">
+            ~{{ Math.round(msg.content.length * 0.5).toLocaleString() }} tokens
           </div>
           <span v-if="msg.isStreaming && isStreaming" class="cursor-blink">|</span>
         </div>
@@ -125,6 +198,16 @@ function toolArgsStr(args: Record<string, unknown>): string {
     <div v-else-if="archiveSummary" class="archive-result">
       <span class="archive-icon">&#x2713;</span>
       <span>{{ archiveSummary }}</span>
+      <div v-if="archiveSteps.length > 0" class="archive-steps">
+        <div
+          v-for="(s, i) in archiveSteps"
+          :key="i"
+          class="archive-step-item"
+        >
+          <span class="archive-step-name">{{ s.name }}</span>
+          <span class="archive-step-result">{{ s.result.slice(0, 120) }}</span>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -205,7 +288,7 @@ function toolArgsStr(args: Record<string, unknown>): string {
 }
 
 .msg-content {
-  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .msg-content :deep(p) {
@@ -221,18 +304,70 @@ function toolArgsStr(args: Record<string, unknown>): string {
   padding: 0.15em 0.4em;
   border-radius: 4px;
   font-size: 0.85em;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
 }
 
 .msg-content :deep(pre) {
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.3);
   padding: 0.75rem;
   border-radius: 8px;
   overflow-x: auto;
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .msg-content :deep(pre code) {
   background: none;
   padding: 0;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 0.85em;
+  line-height: 1.6;
+}
+
+/* ── 直接代码块渲染 ── */
+.direct-code-block {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  overflow: hidden;
+  margin: 0.25rem 0;
+}
+
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0.75rem;
+  background: rgba(0, 0, 0, 0.25);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 0.72rem;
+  color: #6b6b80;
+}
+
+.code-lang-tag {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #9090a8;
+}
+
+.code-line-count {
+  font-feature-settings: 'tnum';
+}
+
+.direct-code-block pre {
+  margin: 0;
+  padding: 0.75rem;
+  background: rgba(0, 0, 0, 0.2);
+  overflow-x: auto;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 0.84em;
+  line-height: 1.6;
+}
+
+.direct-code-block pre code {
+  background: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
 }
 
 .msg-tokens {
@@ -242,6 +377,24 @@ function toolArgsStr(args: Record<string, unknown>): string {
   font-size: 0.68rem;
   color: #3a3a4a;
   text-align: right;
+}
+
+/* ── Reasoning ── */
+.memory-block {
+  margin-bottom: 0.6rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid rgba(52, 211, 153, 0.1);
+  border-radius: 8px;
+  background: rgba(52, 211, 153, 0.03);
+}
+
+.memory-content {
+  color: #6b9078;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow-y: auto;
 }
 
 /* ── Reasoning ── */
@@ -327,7 +480,33 @@ function toolArgsStr(args: Record<string, unknown>): string {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  margin-bottom: 0.2rem;
+  width: 100%;
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  -webkit-appearance: none;
+}
+
+.tool-call-header:hover {
+  opacity: 0.85;
+}
+
+.tool-chevron {
+  margin-left: auto;
+  font-size: 0.6rem;
+  color: #505060;
+  flex-shrink: 0;
+}
+
+.tool-body {
+  margin-top: 0.35rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
 }
 
 .tool-dot {
@@ -444,5 +623,35 @@ function toolArgsStr(args: Record<string, unknown>): string {
 .archive-icon {
   font-size: 0.9rem;
   flex-shrink: 0;
+}
+
+.archive-steps {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  width: 100%;
+}
+
+.archive-step-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-size: 0.7rem;
+  padding: 0.2rem 0;
+}
+
+.archive-step-name {
+  color: #34d399;
+  font-weight: 600;
+  flex-shrink: 0;
+  font-family: 'Consolas', monospace;
+}
+
+.archive-step-result {
+  color: #6b9078;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

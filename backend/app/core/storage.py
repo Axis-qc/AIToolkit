@@ -4,6 +4,7 @@ from datetime import datetime, date
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "conversations"
+MAIN_CONV_ID = "main"
 
 
 def _ensure_dir(path: Path):
@@ -13,8 +14,25 @@ def _ensure_dir(path: Path):
 def _conv_file(conv_id: str) -> Path | None:
     if not DATA_DIR.exists():
         return None
+    if conv_id == MAIN_CONV_ID:
+        f = DATA_DIR / "main.json"
+        return f if f.exists() else None
     for f in DATA_DIR.rglob(f"{conv_id}.json"):
         return f
+    return None
+
+
+def _migrate_main_if_needed() -> Path | None:
+    """检测日期目录中的旧 main.json 并移到根目录"""
+    for f in DATA_DIR.rglob("main.json"):
+        if f.parent != DATA_DIR:
+            try:
+                content = f.read_text(encoding="utf-8")
+                f.unlink()
+                (DATA_DIR / "main.json").write_text(content, encoding="utf-8")
+                return DATA_DIR / "main.json"
+            except Exception:
+                pass
     return None
 
 
@@ -24,11 +42,18 @@ def generate_id() -> str:
 
 def save(conv_id: str, title: str, messages: list[dict],
          archived: bool = False, last_prompt_tokens: int = 0) -> str:
-    today = date.today()
-    file_dir = DATA_DIR / str(today.year) / f"{today.month:02d}-{today.day:02d}"
-    _ensure_dir(file_dir)
-    file_path = file_dir / f"{conv_id}.json"
     now = datetime.utcnow().isoformat()
+
+    if conv_id == MAIN_CONV_ID:
+        file_path = _conv_file(MAIN_CONV_ID)
+        if not file_path:
+            migrated = _migrate_main_if_needed()
+            file_path = migrated or (DATA_DIR / "main.json")
+    else:
+        today = date.today()
+        file_dir = DATA_DIR / str(today.year) / f"{today.month:02d}-{today.day:02d}"
+        _ensure_dir(file_dir)
+        file_path = file_dir / f"{conv_id}.json"
 
     data = {
         "id": conv_id,
@@ -58,7 +83,9 @@ def mark_archived_file(conv_id: str):
     data = load(conv_id)
     if data:
         data["archived"] = True
-        _write_json(_conv_file(conv_id), data)
+        f = _conv_file(conv_id)
+        if f:
+            _write_json(f, data)
 
 
 def _write_json(path: Path, data: dict):
@@ -69,14 +96,18 @@ def load(conv_id: str) -> dict | None:
     f = _conv_file(conv_id)
     if not f:
         return None
-    return json.loads(f.read_text(encoding="utf-8"))
+    raw = f.read_text(encoding="utf-8").strip()
+    if not raw:
+        return None
+    return json.loads(raw)
 
 
 def clear(conv_id: str) -> str | None:
     f = _conv_file(conv_id)
     if not f:
         return None
-    data = json.loads(f.read_text(encoding="utf-8"))
+    raw = f.read_text(encoding="utf-8").strip()
+    data = json.loads(raw) if raw else {}
     now = datetime.utcnow().isoformat()
     data["messages"] = []
     data["updated_at"] = now
@@ -97,6 +128,23 @@ def list_all() -> list[dict]:
     conversations = []
     if not DATA_DIR.exists():
         return conversations
+
+    main_file = DATA_DIR / "main.json"
+    if main_file.exists():
+        try:
+            data = json.loads(main_file.read_text(encoding="utf-8"))
+            conversations.append({
+                "id": data.get("id", "main"),
+                "title": data.get("title", ""),
+                "created_at": data.get("created_at", ""),
+                "updated_at": data.get("updated_at", ""),
+                "archived": data.get("archived", False),
+                "message_count": len(data.get("messages", [])),
+                "last_prompt_tokens": data.get("last_prompt_tokens", 0),
+            })
+        except Exception:
+            pass
+
     for year_dir in sorted(DATA_DIR.glob("*"), reverse=True):
         if not year_dir.is_dir():
             continue
@@ -105,7 +153,10 @@ def list_all() -> list[dict]:
                 continue
             for f in sorted(date_dir.glob("*.json"), reverse=True):
                 try:
-                    data = json.loads(f.read_text(encoding="utf-8"))
+                    raw = f.read_text(encoding="utf-8").strip()
+                    if not raw:
+                        continue
+                    data = json.loads(raw)
                     conversations.append({
                         "id": data.get("id"),
                         "title": data.get("title", ""),

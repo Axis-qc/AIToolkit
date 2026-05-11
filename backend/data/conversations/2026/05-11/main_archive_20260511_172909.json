@@ -1,0 +1,107 @@
+{
+  "id": "main_archive_20260511_172909",
+  "title": "你好 (归档)",
+  "created_at": "2026-05-11T09:29:09.757398",
+  "updated_at": "2026-05-11T09:29:09.757398",
+  "archived": true,
+  "last_prompt_tokens": 2172,
+  "messages": [
+    {
+      "role": "user",
+      "content": "你好",
+      "timestamp": "2026-05-11T09:20:20.335342+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "你好！我是你的 AI 助手，具备长期记忆能力，可以帮你记录偏好、计划、知识点等各种信息。有什么我可以帮你的吗？",
+      "timestamp": "2026-05-11T09:20:20.335342+00:00"
+    },
+    {
+      "role": "user",
+      "content": "在吗",
+      "timestamp": "2026-05-11T09:20:20.335342+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "在的！随时都在。有什么需要我帮忙的吗？",
+      "timestamp": "2026-05-11T09:20:20.335342+00:00"
+    },
+    {
+      "role": "user",
+      "content": "这个项目结构是什么样的",
+      "timestamp": "2026-05-11T09:20:20.335342+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "让我来看看这个项目的结构。",
+      "timestamp": "2026-05-11T09:20:20.335342+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "让我读取几个核心文件来了解项目架构：",
+      "timestamp": "2026-05-11T09:20:20.335342+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "这个项目是一个 **AI 知识图谱记忆系统**，基于 FastAPI 构建。整体结构如下：\n\n```\nAIChat/                          # 项目根目录\n├── app/                         # 应用主目录\n│   ├── main.py                  # FastAPI 入口，注册路由和中间件\n│   ├── api/                     # API 路由层\n│   │   ├── chat.py              # 对话接口\n│   │   └── graph.py             # 知识图谱接口\n│   ├── core/                    # 核心模块\n│   │   ├── config.py            # 配置管理（DeepSeek API、白名单等）\n│   │   ├── graph.py             # 知识图谱数据库操作（SQLite）\n│   │   ├── memory.py            # 记忆管理逻辑\n│   │   └── storage.py           # 存储相关\n│   ├── models/                  # 数据模型\n│   │   └── chat.py              # 聊天相关模型\n│   ├── tools/                   # AI 工具函数\n│   │   ├── __init__.py\n│   │   ├── delete_from_graph.py # 从图谱删除\n│   │   ├── run_command.py       # 执行命令\n│   │   └── search_content.py    # 搜索内容\n│   ├── prompts/                 # 提示词模板\n│   │   ├── chat_system.txt      # 对话系统提示\n│   │   └── graph_update.txt     # 图谱更新提示\n│   └── static/                  # 静态文件（含 graph.html 可视化）\n├── data/                        # 数据目录\n│   ├── graph.db                 # SQLite 知识图谱数据库\n│   ├── chat.log                 # 聊天日志\n│   └── conversations/           # 对话存档（按日期归档）\n└── .env.example                 # 环境变量模板\n```\n\n**核心架构特点：**\n\n- **数据库**：使用 SQLite（aiosqlite 异步驱动），包含 `entities`（实体）、`relations`（关系）、`facts`（事实）、`conversations`（对话）四张核心表\n- **AI 模型**：对接 DeepSeek API，在 `.env` 中配置\n- **知识图谱**：以用户为中心，存储实体、关系、事实，支持搜索和关联查询\n- **文件操作**：AI 可在白名单目录内读写文件、执行命令、搜索代码\n- **对话归档**：按日期自动归档到 `data/conversations/`\n\n简单来说，这就是一个带有持久化记忆能力的 AI 助手系统。需要我深入介绍某个模块吗？",
+      "timestamp": "2026-05-11T09:20:20.335342+00:00"
+    },
+    {
+      "role": "user",
+      "content": "你不应该使用记忆吗》",
+      "timestamp": "2026-05-11T09:20:20.335342+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "你说得对！让我先搜索记忆，然后把当前对话中的重要信息记下来。",
+      "tool_calls": [
+        {
+          "id": "call_00_OlfopsxcSqYK38aF4C7f9332",
+          "type": "function",
+          "function": {
+            "name": "search_memory",
+            "arguments": "{\"query\": \"用户偏好 项目 记忆\"}"
+          }
+        }
+      ],
+      "reasoning_content": "用户指出我应该使用记忆功能。让我先搜索一下记忆中是否有相关信息，然后根据对话内容保存记忆。\n\n用户说的是\"你不应该使用记忆吗》，意思是我应该主动使用记忆功能来记住他说的话和偏好。\n\n让我先搜索记忆看看有什么，然后记住用户这个反馈——他希望我主动使用记忆功能。",
+      "timestamp": "2026-05-11T09:20:20.335342+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_00_OlfopsxcSqYK38aF4C7f9332",
+      "content": "## 关于 知识图谱记忆系统\n- 关联概念：AI系统架构, 文件操作工具集成方案\n- 来源对话：[你好]\n## 关于 AI主动记忆写入\n- 关联概念：AIChat项目, AXIS\n- 来源对话：[你好]\n## 关于 AIChat项目\n- 关联概念：AI主动记忆写入, AXIS, ChatView.vue, ChatView.vue归档位置修复, ChatView.vue滚动修复\n- 来源对话：[你好]\n## 关于 文件操作工具集成方案\n- 关联概念：AI系统架构, AXIS, 知识图谱记忆系统\n- 来源对话：[你好]\n## 关于 AXIS\n- [identity] 用户的名字是AXIS\n- [plan] AXIS 在探索给 AI 挂载文件操作工具的方案，让 AI 能在指定目录内修改文件，与知识图谱记忆系统互补\n- [preference] AXIS 对 AI 系统架构设计有浓厚兴趣，并非随意闲聊，在认真探索技术落地路径\n- 关联概念：AIChat项目, AI主动记忆写入, AI系统架构, ChatView.vue归档位置修复, ChatView.vue滚动修复\n- 来源对话：[你好]",
+      "timestamp": "2026-05-11T09:20:20.335342+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "你说得对，AXIS！我确实应该更主动地使用记忆。现在我已经搜索了图谱，之前已经记住了你的一些信息：\n\n- 你的名字是 **AXIS**\n- 你在探索 **AI 文件操作工具** 与 **知识图谱记忆系统** 互补的方案\n- 你对 AI 系统架构设计有浓厚兴趣\n\n刚才我问你\"需要深入介绍某个模块吗\"却没有主动记录你的偏好，这是我的疏忽。让我现在把这次的反馈记下来：",
+      "tool_calls": [
+        {
+          "id": "call_00_doEdFvo6aTPeZAWAFbGc9345",
+          "type": "function",
+          "function": {
+            "name": "save_to_graph",
+            "arguments": "{\"nodes\": [{\"name\": \"AI记忆使用机制\", \"type\": \"topic\", \"properties\": {\"说明\": \"AI应在对话中主动搜索记忆并保存重要信息，不等对话结束\"}}], \"relations\": [{\"from_type\": \"Person\", \"from_name\": \"AXIS\", \"to_type\": \"topic\", \"to_name\": \"AI记忆使用机制\", \"rel_type\": \"提醒改进\", \"properties\": {\"细节\": \"指出AI应该在对话中主动使用记忆功能，而不是等到最后\"}}], \"facts\": [{\"content\": \"AXIS提醒AI应主动使用记忆功能，在对话过程中就保存重要信息，而不是等对话结束\", \"type\": \"preference\", \"about_entities\": [\"AXIS\", \"AI记忆使用机制\"]}]}"
+          }
+        }
+      ],
+      "reasoning_content": "记忆已经有一些内容了。用户 AXIS 指出我应该主动使用记忆功能。现在我需要在对话中保存一些信息：用户指出我应该使用记忆功能，这是一个偏好/反馈。同时用户问项目结构，这个对话内容可能有些可以保存的内容。\n\n但更重要的是，用户指出我没有主动使用记忆。从现在开始我应该更加主动地使用 `save_to_graph` 来记住重要信息。\n\n让我先保存这个对话中的重要信息——用户提醒我要主动使用记忆功能。",
+      "timestamp": "2026-05-11T09:20:20.335342+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_00_doEdFvo6aTPeZAWAFbGc9345",
+      "content": "已写入图谱",
+      "timestamp": "2026-05-11T09:20:20.335342+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "已记录！感谢你的提醒。以后每轮对话我都会先搜索记忆、再主动保存有价值的信息。关于项目结构还有什么想深入了解的吗？",
+      "reasoning_content": "已保存成功。现在我需要承认错误并继续对话。",
+      "timestamp": "2026-05-11T09:20:20.335342+00:00",
+      "prompt_tokens": 2172,
+      "completion_tokens": 1391
+    }
+  ]
+}
