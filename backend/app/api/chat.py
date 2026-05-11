@@ -13,6 +13,7 @@ from app.core import memory
 from app.core import storage
 from app.core import logger as log
 from app.core.config import settings
+from app.core.cache import cache, hash_messages, hash_args, hash_content, TTL_REQUEST, TTL_TOOL_RESULT, WRITE_TOOLS
 from app.models.chat import ChatRequest
 from app.tools import TOOL_DEFINITIONS, dispatch
 
@@ -95,10 +96,33 @@ async def chat(req: Annotated[ChatRequest, Body()]) -> StreamingResponse:
     async def generate():
         yield ": connected\n\n"
 
+        # ── 缓存写入准备 ──
+        event_buffer: list[dict] = []
+        had_write = False
+
+        def _emit(event: dict) -> str:
+            """记录事件到缓冲区并返回 SSE 字符串。"""
+            event_buffer.append(event)
+            return f"data: {json.dumps(event)}\n\n"
+
         if should_archive:
-            yield f"data: {json.dumps({'type': 'archived', 'archived_id': archived_id, 'title': archived_title})}\n\n"
+            yield _emit({'type': 'archived', 'archived_id': archived_id, 'title': archived_title})
 
         current_messages = messages
+
+        # ── 请求级缓存检查（在记忆注入前，按单条用户消息计算 key）──
+        last_user_content = ""
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                last_user_content = m.get("content", "")
+                break
+        req_cache_key = f"req:{settings.chat_model}:{hash_content(last_user_content)}"
+        cached_events = cache.get(req_cache_key)
+        if cached_events is not None:
+            log.get().info(f"[缓存] 请求级命中 | key={req_cache_key[:24]}...")
+            for evt in cached_events:
+                yield f"data: {json.dumps(evt)}\n\n"
+            return
 
         # === 自动检索记忆并注入上下文 ===
         last_user_msg = ""
@@ -119,12 +143,12 @@ async def chat(req: Annotated[ChatRequest, Body()]) -> StreamingResponse:
                     }
                     current_messages.insert(last_user_idx, memory_msg)
                     log.get().info(f"[记忆] 注入记忆梗概 ({len(memory_result)} 字符)")
-                    yield f"data: {json.dumps({'type': 'memory_context', 'content': memory_result})}\n\n"
+                    yield _emit({'type': 'memory_context', 'content': memory_result})
                 else:
-                    yield f"data: {json.dumps({'type': 'memory_context', 'content': ''})}\n\n"
+                    yield _emit({'type': 'memory_context', 'content': ''})
             except Exception as e:
                 log.get().warning(f"[记忆] 预检索失败，跳过注入: {e}")
-                yield f"data: {json.dumps({'type': 'memory_context', 'content': ''})}\n\n"
+                yield _emit({'type': 'memory_context', 'content': ''})
 
         def _save_checkpoint():
             now = datetime.now(timezone.utc).isoformat()
@@ -176,11 +200,11 @@ async def chat(req: Annotated[ChatRequest, Body()]) -> StreamingResponse:
 
                     if delta.content:
                         content_buffer += delta.content
-                        yield f"data: {json.dumps({'type': 'token', 'content': delta.content})}\n\n"
+                        yield _emit({'type': 'token', 'content': delta.content})
 
                     if getattr(delta, 'reasoning_content', None):
                         reasoning_buffer += delta.reasoning_content
-                        yield f"data: {json.dumps({'type': 'reasoning', 'content': delta.reasoning_content})}\n\n"
+                        yield _emit({'type': 'reasoning', 'content': delta.reasoning_content})
 
                 if tool_calls:
                     assistant_msg = {
@@ -200,20 +224,44 @@ async def chat(req: Annotated[ChatRequest, Body()]) -> StreamingResponse:
                                     "arguments": tc["arguments"],
                                 },
                             })
-                            args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                            try:
+                                args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                            except json.JSONDecodeError as e:
+                                log.get().warning(f"[工具] JSON解析失败 {tc['name']}: {e} | raw={tc['arguments'][:200]}")
+                                args = {}
                             args_preview = json.dumps(args, ensure_ascii=False)[:120]
                             log.get().info(f"[工具] 调用 {tc['name']} | args={args_preview}")
-                            yield f"data: {json.dumps({'type': 'tool_call', 'name': tc['name'], 'arguments': args})}\n\n"
+                            yield _emit({'type': 'tool_call', 'name': tc['name'], 'arguments': args})
 
                     current_messages.append(assistant_msg)
 
                     for tc in tool_calls:
                         if tc["name"]:
-                            args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-                            result = await dispatch(tc["name"], args, conv_id=conv_id)
+                            try:
+                                args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                            except json.JSONDecodeError as e:
+                                log.get().warning(f"[工具] JSON解析失败 {tc['name']}: {e} | raw={tc['arguments'][:200]}")
+                                args = {}
+
+                            # ── 工具结果缓存 ──
+                            tool_cache_key = f"tool:{tc['name']}:{hash_args(args)}"
+                            cached_result = cache.get(tool_cache_key)
+                            if cached_result is not None:
+                                result = cached_result
+                                log.get().info(f"[缓存] 工具结果命中 {tc['name']}")
+                            else:
+                                result = await dispatch(tc["name"], args, conv_id=conv_id)
+                                if tc['name'] not in WRITE_TOOLS:
+                                    cache.set(tool_cache_key, result, TTL_TOOL_RESULT)
+
+                            # ── 写操作触发失效 ──
+                            if tc['name'] in WRITE_TOOLS:
+                                cache.invalidate_write(tc['name'])
+                                had_write = True
+
                             result_preview = result[:120].replace("\n", " ")
                             log.get().info(f"[工具] 结果 {tc['name']} | {result_preview}")
-                            yield f"data: {json.dumps({'type': 'tool_result', 'tool_call_id': tc['id'], 'content': result})}\n\n"
+                            yield _emit({'type': 'tool_result', 'tool_call_id': tc['id'], 'content': result})
                             current_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc["id"],
@@ -269,7 +317,15 @@ async def chat(req: Annotated[ChatRequest, Body()]) -> StreamingResponse:
         except Exception:
             pass
 
-        yield f"data: {json.dumps({'type': 'done', 'conversation_id': conv_id, 'prompt_tokens': total_prompt_tokens, 'completion_tokens': total_completion_tokens})}\n\n"
+        done_event = {'type': 'done', 'conversation_id': conv_id, 'prompt_tokens': total_prompt_tokens, 'completion_tokens': total_completion_tokens}
+
+        # ── 请求级缓存写入（无写操作时） ──
+        if not had_write:
+            event_buffer.append(done_event)
+            cache.set(req_cache_key, event_buffer, TTL_REQUEST)
+            log.get().info(f"[缓存] 请求级写入 | key={req_cache_key[:24]}... | events={len(event_buffer)}")
+
+        yield f"data: {json.dumps(done_event)}\n\n"
         log.get().info(f"[完成] prompt={total_prompt_tokens} completion={total_completion_tokens} | 总消息 {len(saved_messages)} 条")
 
     return StreamingResponse(

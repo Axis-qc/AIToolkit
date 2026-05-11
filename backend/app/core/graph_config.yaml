@@ -1,0 +1,156 @@
+# ============================================================
+# 记忆图谱配置 — 所有中心、类型、渲染、注入规则集中管理
+# ============================================================
+
+# ----- 根实体（中心）-----
+# 每个中心是一个独立上下文容器。type + name 唯一标识。
+# is_root: 是否在力导向图中作为固定锚点
+centers:
+  - type: User
+    name: AXIS
+    icon: "\U0001F464"
+    label: "关于你"
+    description: "用户的偏好、事实、计划、待办"
+    is_root: true
+    render:
+      radius: 28
+      pulse: "double"
+      color: "#60a5fa"
+      truncate_name: false
+
+  - type: AI
+    name: Midnight
+    icon: "\U0001F916"
+    label: "关于我"
+    description: "AI 的行为规则、能力边界、经验教训"
+    is_root: true
+    render:
+      radius: 24
+      pulse: "double"
+      color: "#a78bfa"
+      truncate_name: false
+
+  - type: Project
+    name: AIChat
+    icon: "\U0001F4C1"
+    label: "项目 AIChat"
+    description: "技术栈、关键文件、架构决策"
+    is_root: true
+    render:
+      radius: 22
+      pulse: "single"
+      color: "#34d399"
+      truncate_name: false
+
+# ----- 实体类型统一配置 -----
+# 每个 type 的 icon / label_prefix / render 全部在这里定义，单一来源。
+entity_types:
+  # ---- 根实体类型 ----
+  User:
+    icon: "\U0001F464"
+    label_prefix: "关于你"
+    render:
+      radius: 28
+      pulse: "double"
+      color: "#60a5fa"
+      truncate_name: false
+  AI:
+    icon: "\U0001F916"
+    label_prefix: "关于我"
+    render:
+      radius: 24
+      pulse: "double"
+      color: "#a78bfa"
+      truncate_name: false
+  Project:
+    icon: "\U0001F4C1"
+    label_prefix: "项目"
+    render:
+      radius: 22
+      pulse: "single"
+      color: "#34d399"
+      truncate_name: false
+
+  # ---- 未来可扩展的根类型 ----
+  Novel:
+    icon: "\U0001F4D6"
+    label_prefix: "小说"
+    render:
+      radius: 22
+      pulse: "single"
+      color: "#f59e0b"
+      truncate_name: false
+  Game:
+    icon: "\U0001F3AE"
+    label_prefix: "游戏"
+    render:
+      radius: 22
+      pulse: "single"
+      color: "#ef4444"
+      truncate_name: false
+  Topic:
+    icon: "\U0001F4DA"
+    label_prefix: "学习"
+    render:
+      radius: 20
+      pulse: "none"
+      color: "#8b5cf6"
+      truncate_name: false
+
+  # ---- 概念实体类型（非根，仅图标）----
+  preference:
+    icon: "\U0001F499"
+  fact:
+    icon: "\U0001F4CB"
+  event:
+    icon: "\U0001F4C5"
+  plan:
+    icon: "\U0001F3AF"
+  topic:
+    icon: "\U0001F4D6"
+  todo:
+    icon: "\u2705"
+  conflict:
+    icon: "\u26A0\uFE0F"
+  pending:
+    icon: "\u2753"
+
+# ----- 默认渲染（entity_types 中找不到的 type 使用此默认值）-----
+default_render:
+  radius: 18
+  pulse: "none"
+  color: "#7c7c90"
+  truncate_name: true
+  max_name_len: 12
+  default_icon: "\U0001F4CC"
+
+# ----- 记忆注入格式 -----
+injection:
+  header: "[记忆检索结果]"
+  section_template: "## {icon} {label}"
+  unknown_section_icon: "\U0001F4CC"
+  unknown_section_label: "其他"
+  item_template: "## 关于 {entity} (重要度 {importance}/10){pinned_mark}"
+  relation_label: "关联概念"
+  source_label: "来源对话"
+  no_result: "\uff08未找到相关记忆\uff09"
+
+# ----- 根实体间互相关系（启动时自动创建）-----
+root_relations:
+  - from: ["User", "AXIS"]
+    to: ["AI", "Midnight"]
+    rel_type: "使用"
+  - from: ["AI", "Midnight"]
+    to: ["User", "AXIS"]
+    rel_type: "服务"
+  - from: ["User", "AXIS"]
+    to: ["Project", "AIChat"]
+    rel_type: "开发"
+  - from: ["AI", "Midnight"]
+    to: ["Project", "AIChat"]
+    rel_type: "协助开发"
+
+# ----- 提示词文件引用 -----
+prompts:
+  chat_system: "chat_system.txt"
+  graph_update: "graph_update.txt"

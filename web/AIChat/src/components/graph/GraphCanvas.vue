@@ -2,6 +2,67 @@
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { fetchGraph, type GraphNode, type GraphEdge, type GraphFact } from '@/api/graph'
 
+interface GraphConfig {
+  centers: Array<{
+    type: string
+    name: string
+    icon: string
+    label: string
+    is_root: boolean
+    render: {
+      radius: number
+      pulse: string
+      color: string
+      truncate_name: boolean
+    }
+  }>
+  entity_types: Record<string, {
+    icon?: string
+    label_prefix?: string
+    render?: {
+      radius?: number
+      pulse?: string
+      color?: string
+      truncate_name?: boolean
+    }
+  }>
+  default_render: {
+    radius: number
+    pulse: string
+    color: string
+    truncate_name: boolean
+    max_name_len: number
+  }
+  root_node_ids: string[]
+  injection: {
+    header: string
+    section_template: string
+    unknown_section_icon: string
+    unknown_section_label: string
+    item_template: string
+    relation_label: string
+    source_label: string
+    no_result: string
+  }
+}
+
+const graphConfig = ref<GraphConfig | null>(null)
+
+async function fetchConfig() {
+  try {
+    const resp = await fetch('/api/graph/config')
+    graphConfig.value = await resp.json()
+  } catch {
+    graphConfig.value = {
+      centers: [],
+      entity_types: {},
+      default_render: { radius: 18, pulse: 'none', color: '#7c7c90', truncate_name: true, max_name_len: 12 },
+      root_node_ids: [],
+      injection: { header: '', section_template: '', unknown_section_icon: '\uD83D\uDCCC', unknown_section_label: '其他', item_template: '', relation_label: '', source_label: '', no_result: '' },
+    }
+  }
+}
+
 interface LayoutNode {
   id: string
   name: string
@@ -22,6 +83,7 @@ interface LayoutEdge {
 interface Particle {
   x: number; y: number; vx: number; vy: number
   r: number; alpha: number; alphaDir: number
+  hue: number
 }
 
 const nodes = ref<LayoutNode[]>([])
@@ -48,18 +110,23 @@ const mode = ref<'idle' | 'pan' | 'drag'>('idle')
 
 // ===== 粒子系统 =====
 const canvasRef = ref<HTMLCanvasElement | null>(null)
+const svgRef = ref<SVGSVGElement | null>(null)
 const particles = ref<Particle[]>([])
-const PARTICLE_COUNT = 70
+const PARTICLE_COUNT = 100
+const mouseCanvas = ref({ x: -999, y: -999 })
 
 function initParticles(w: number, h: number) {
+  const baseHues = [210, 230, 250, 270, 195, 225, 245, 260]
   const arr: Particle[] = []
   for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const baseHue = baseHues[i % baseHues.length]!
     arr.push({
       x: Math.random() * w, y: Math.random() * h,
-      vx: (Math.random() - 0.5) * 0.3, vy: (Math.random() - 0.5) * 0.3,
-      r: Math.random() * 1.6 + 0.4,
-      alpha: Math.random() * 0.5 + 0.15,
+      vx: (Math.random() - 0.5) * 0.2, vy: (Math.random() - 0.5) * 0.2,
+      r: Math.random() * 2.2 + 0.4,
+      alpha: Math.random() * 0.6 + 0.15,
       alphaDir: Math.random() > 0.5 ? 1 : -1,
+      hue: baseHue + (Math.random() - 0.5) * 30,
     })
   }
   particles.value = arr
@@ -72,31 +139,43 @@ function animateParticles() {
   if (!ctx) return
   const w = c.width, h = c.height
   ctx.clearRect(0, 0, w, h)
+  const mx = mouseCanvas.value.x
+  const my = mouseCanvas.value.y
+
   for (const p of particles.value) {
+    const ddx = mx - p.x, ddy = my - p.y
+    const dm = Math.sqrt(ddx * ddx + ddy * ddy)
+    if (dm < 200 && dm > 1) {
+      const force = 0.02 / Math.max(dm * 0.04, 1)
+      p.vx += (ddx / dm) * force
+      p.vy += (ddy / dm) * force
+    }
     p.x += p.vx; p.y += p.vy
-    if (p.x < 0) p.x = w
-    if (p.x > w) p.x = 0
-    if (p.y < 0) p.y = h
-    if (p.y > h) p.y = 0
-    p.alpha += 0.003 * p.alphaDir
-    if (p.alpha >= 0.55) p.alphaDir = -1
-    if (p.alpha <= 0.12) p.alphaDir = 1
+    p.vx *= 0.998; p.vy *= 0.998
+    if (p.x < -10) p.x = w + 10
+    if (p.x > w + 10) p.x = -10
+    if (p.y < -10) p.y = h + 10
+    if (p.y > h + 10) p.y = -10
+    p.alpha += 0.0025 * p.alphaDir
+    if (p.alpha >= 0.6) p.alphaDir = -1
+    if (p.alpha <= 0.1) p.alphaDir = 1
     ctx.beginPath()
     ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2)
-    ctx.fillStyle = `rgba(160,160,200,${p.alpha.toFixed(2)})`
+    ctx.fillStyle = `hsla(${p.hue}, 65%, 82%, ${p.alpha.toFixed(2)})`
     ctx.fill()
   }
-  // 粒子间连线
   for (let i = 0; i < particles.value.length; i++) {
     for (let j = i + 1; j < particles.value.length; j++) {
       const a = particles.value[i]!, b = particles.value[j]!
       const dx = a.x - b.x, dy = a.y - b.y
       const dist = Math.sqrt(dx * dx + dy * dy)
-      if (dist < 70) {
+      if (dist < 85) {
+        const ratio = 1 - dist / 85
+        const avgHue = (a.hue + b.hue) / 2
         ctx.beginPath()
         ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y)
-        ctx.strokeStyle = `rgba(130,130,180,${(0.05 * (1 - dist / 70)).toFixed(3)})`
-        ctx.lineWidth = 0.4
+        ctx.strokeStyle = `hsla(${avgHue}, 45%, 78%, ${(0.15 * ratio * ratio).toFixed(3)})`
+        ctx.lineWidth = 0.5 * ratio
         ctx.stroke()
       }
     }
@@ -106,6 +185,20 @@ function animateParticles() {
 
 const resizeObserver = ref<ResizeObserver | null>(null)
 let resizeRafId = 0
+
+function onSvgMouseMove(e: MouseEvent) {
+  const svg = svgRef.value
+  if (!svg) return
+  const rect = svg.getBoundingClientRect()
+  mouseCanvas.value = {
+    x: e.clientX - rect.left,
+    y: e.clientY - rect.top,
+  }
+}
+
+function onSvgMouseLeave() {
+  mouseCanvas.value = { x: -999, y: -999 }
+}
 
 function resizeCanvas() {
   if (resizeRafId) return // 已排队，跳过
@@ -120,9 +213,14 @@ function resizeCanvas() {
     if (c.width === w && c.height === h) return // 尺寸没变，跳过
     c.width = w
     c.height = h
-    // 只在粒子未初始化或数量不匹配时重新初始化
     if (particles.value.length === 0) {
       initParticles(w, h)
+    } else {
+      // 窗口resize时重新分布粒子到全屏
+      for (const p of particles.value) {
+        p.x = Math.random() * w
+        p.y = Math.random() * h
+      }
     }
   })
 }
@@ -184,7 +282,9 @@ function nodeColor(type: string): string {
 }
 
 function nodeRadius(type: string): number {
-  return type === 'User' ? 28 : 18
+  const c = graphConfig.value?.centers.find((c: { type: string }) => c.type === type)
+  if (c) return c.render.radius
+  return graphConfig.value?.default_render.radius ?? 18
 }
 
 function nodeFill(type: string): string {
@@ -208,6 +308,25 @@ function typeLabel(type: string): string {
     skill: '技能',
   }
   return m[type] || type
+}
+
+function nodeIcon(type: string): string {
+  const m: Record<string, string> = {
+    User: '\u2299',
+    preference: '\u2661',
+    fact: '\u25CF',
+    event: '\u25C6',
+    plan: '\u25B6',
+    topic: '\u2726',
+    todo: '\u2610',
+    conflict: '\u26A1',
+    pending: '?',
+    habit: '\u21BB',
+    interest: '\u2605',
+    project: '\u2B21',
+    skill: '\u25C6',
+  }
+  return m[type] || '\u25CF'
 }
 
 const selectedNode = computed(() => {
@@ -237,7 +356,10 @@ function edgeLabelPos(edge: LayoutEdge) {
   const dx = t.x - s.x
   const dy = t.y - s.y
   const len = Math.sqrt(dx * dx + dy * dy) || 1
-  const offset = 10
+  const hash = (edge.source + edge.target + edge.rel_type).split('').reduce((a, c) => a + c.charCodeAt(0), 0)
+  const sign = hash % 2 === 0 ? 1 : -1
+  const stagger = 12 + (hash % 5) * 9
+  const offset = stagger * sign
   return { x: mx - (dy / len) * offset, y: my + (dx / len) * offset }
 }
 
@@ -262,20 +384,31 @@ function truncateName(name: string, maxLen = 10): string {
   return name.length > maxLen ? name.slice(0, maxLen) + '…' : name
 }
 
+function isRootNode(node: { type: string, id: string }): boolean {
+  return graphConfig.value?.root_node_ids?.includes(node.id) ?? false
+}
+
+function getPulseType(node: { type: string }): string {
+  const c = graphConfig.value?.centers.find((c: { type: string }) => c.type === node.type)
+  return c?.render?.pulse ?? 'none'
+}
+
+function shouldTruncate(type: string): boolean {
+  const c = graphConfig.value?.centers.find((c: { type: string }) => c.type === type)
+  if (c) return c.render.truncate_name ?? false
+  return graphConfig.value?.default_render.truncate_name ?? true
+}
+
 function simulate() {
   const cx = svgWidth.value / 2
   const cy = svgHeight.value / 2
 
   for (const node of nodes.value) {
-    if (node.fixed) {
-      node.x = cx
-      node.y = cy
-    } else {
-      const angle = Math.random() * 2 * Math.PI
-      const r = 300 + Math.random() * 350
-      node.x = cx + Math.cos(angle) * r
-      node.y = cy + Math.sin(angle) * r
-    }
+    if (node.fixed) continue
+    const angle = Math.random() * 2 * Math.PI
+    const r = 300 + Math.random() * 350
+    node.x = cx + Math.cos(angle) * r
+    node.y = cy + Math.sin(angle) * r
     node.vx = 0
     node.vy = 0
   }
@@ -328,9 +461,6 @@ function simulate() {
       node.x += node.vx
       node.y += node.vy
     }
-
-    const user = nodes.value.find(n => n.fixed)
-    if (user) { user.x = cx; user.y = cy }
   }
 }
 
@@ -419,11 +549,18 @@ async function refresh() {
       facts.value = []
     } else {
       empty.value = false
-      nodes.value = data.nodes.map(n => ({
-        ...n,
-        x: 0, y: 0, vx: 0, vy: 0,
-        fixed: n.id === 'User|default',
-      }))
+      const rootIds = new Set(graphConfig.value?.root_node_ids ?? [])
+      const rootCount = rootIds.size
+      let rootIndex = 0
+      const r = 120
+      nodes.value = data.nodes.map(n => {
+        if (rootIds.has(n.id)) {
+          const angle = (rootIndex / rootCount) * 2 * Math.PI
+          rootIndex++
+          return { ...n, x: r * Math.cos(angle), y: r * Math.sin(angle), vx: 0, vy: 0, fixed: true }
+        }
+        return { ...n, x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200, vx: 0, vy: 0, fixed: false }
+      })
       edges.value = data.edges
       facts.value = data.facts
       simulate()
@@ -437,18 +574,23 @@ async function refresh() {
 }
 
 onMounted(async () => {
+  await fetchConfig()
   await refresh()
   await nextTick()
   resizeCanvas()
-  initParticles(canvasRef.value?.width || 800, canvasRef.value?.height || 600)
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
   animateParticles()
-  // ResizeObserver 监听容器大小变化（sidebar 展开/收起等）
   const container = canvasRef.value?.parentElement
   if (container) {
     resizeObserver.value = new ResizeObserver(() => {
       resizeCanvas()
     })
     resizeObserver.value.observe(container)
+  }
+  const svg = svgRef.value
+  if (svg) {
+    svg.addEventListener('mousemove', onSvgMouseMove)
+    svg.addEventListener('mouseleave', onSvgMouseLeave)
   }
   setTimeout(() => { showUI.value = true }, 400)
 })
@@ -467,6 +609,11 @@ onUnmounted(() => {
   cancelAnimationFrame(animFrame.value)
   if (resizeRafId) cancelAnimationFrame(resizeRafId)
   resizeObserver.value?.disconnect()
+  const svg = svgRef.value
+  if (svg) {
+    svg.removeEventListener('mousemove', onSvgMouseMove)
+    svg.removeEventListener('mouseleave', onSvgMouseLeave)
+  }
 })
 </script>
 
@@ -498,24 +645,47 @@ onUnmounted(() => {
       </div>
     </Transition>
 
+    <!-- 浮动图例 -->
+    <Transition name="search-fade">
+      <div v-if="showUI && !loading && !empty" class="type-legend">
+        <span v-for="(clr, type) in COLOR" :key="type" class="legend-chip" :style="{ '--c': clr }">
+          {{ nodeIcon(type) }} {{ typeLabel(type) }}
+        </span>
+      </div>
+    </Transition>
+
     <!-- 加载状态 -->
     <div v-if="loading" class="graph-status">
-      <div class="loader-ring"><div class="loader-ring-inner" /></div>
+      <div class="orbit-loader">
+        <div class="orbit-ring o-1" />
+        <div class="orbit-ring o-2" />
+        <div class="orbit-ring o-3" />
+        <div class="orbit-core" />
+      </div>
       <span class="loading-text">加载图谱</span>
     </div>
 
     <!-- 空状态 -->
     <div v-else-if="empty" class="graph-status">
-      <div class="empty-icon">
-        <svg width="80" height="80" viewBox="0 0 80 80" fill="none">
-          <circle cx="40" cy="40" r="36" stroke="#1e1e32" stroke-width="1" stroke-dasharray="8 5"/>
-          <circle cx="40" cy="40" r="18" stroke="#1a1a2e" stroke-width="0.8"/>
-          <circle cx="26" cy="28" r="7" fill="none" stroke="#2a2a42" stroke-width="0.8"/>
-          <circle cx="54" cy="32" r="5" fill="none" stroke="#2a2a42" stroke-width="0.8"/>
-          <circle cx="44" cy="54" r="6" fill="none" stroke="#2a2a42" stroke-width="0.8"/>
-          <line x1="31" y1="31" x2="49" y2="34" stroke="#222240" stroke-width="0.7"/>
-          <line x1="52" y1="36" x2="47" y2="49" stroke="#222240" stroke-width="0.7"/>
-          <line x1="23" y1="32" x2="40" y2="50" stroke="#222240" stroke-width="0.7"/>
+      <div class="empty-illustration">
+        <svg width="120" height="120" viewBox="0 0 120 120" fill="none">
+          <!-- 外圈 -->
+          <circle cx="60" cy="60" r="52" stroke="#1e1e3a" stroke-width="0.8" stroke-dasharray="6 5"/>
+          <circle cx="60" cy="60" r="38" stroke="#1a1a34" stroke-width="0.6"/>
+          <!-- 装饰弧线 -->
+          <path d="M48 24a46 46 0 0 1 32 0" stroke="#222250" stroke-width="0.6" stroke-linecap="round"/>
+          <path d="M96 70a46 46 0 0 1-40 26" stroke="#222250" stroke-width="0.6" stroke-linecap="round"/>
+          <!-- 节点 -->
+          <circle cx="36" cy="42" r="10" fill="none" stroke="#2d2d52" stroke-width="0.9"/>
+          <circle cx="36" cy="42" r="3.5" fill="#3a3a60" opacity="0.7"/>
+          <circle cx="82" cy="48" r="7.5" fill="none" stroke="#2d2d52" stroke-width="0.9"/>
+          <circle cx="82" cy="48" r="2.5" fill="#3a3a60" opacity="0.7"/>
+          <circle cx="62" cy="80" r="8.5" fill="none" stroke="#2d2d52" stroke-width="0.9"/>
+          <circle cx="62" cy="80" r="3" fill="#3a3a60" opacity="0.7"/>
+          <!-- 连线 -->
+          <path d="M44 46 Q58 44 76 48" stroke="#222248" stroke-width="0.7"/>
+          <path d="M80 53 Q70 66 67 73" stroke="#222248" stroke-width="0.7"/>
+          <path d="M32 47 Q46 64 56 74" stroke="#222248" stroke-width="0.7"/>
         </svg>
       </div>
       <span class="empty-text">暂无图谱数据</span>
@@ -524,6 +694,7 @@ onUnmounted(() => {
 
     <!-- 图谱画布 -->
     <svg
+      ref="svgRef"
       v-show="!loading && !empty"
       class="graph-svg"
       :viewBox="`0 0 ${svgWidth} ${svgHeight}`"
@@ -578,7 +749,21 @@ onUnmounted(() => {
         <radialGradient id="grad-project" cx="35%" cy="35%"><stop offset="0%" stop-color="#a5b4fc"/><stop offset="100%" stop-color="#4f46e5"/></radialGradient>
         <radialGradient id="grad-skill" cx="35%" cy="35%"><stop offset="0%" stop-color="#86efac"/><stop offset="100%" stop-color="#16a34a"/></radialGradient>
         <radialGradient id="grad-__default__" cx="35%" cy="35%"><stop offset="0%" stop-color="#a1a1aa"/><stop offset="100%" stop-color="#52525b"/></radialGradient>
+
+        <!-- 点阵背景 -->
+        <pattern id="dot-grid" width="28" height="28" patternUnits="userSpaceOnUse">
+          <circle cx="14" cy="14" r="0.6" fill="rgba(255,255,255,0.06)"/>
+        </pattern>
+        <pattern id="dot-grid-small" width="7" height="7" patternUnits="userSpaceOnUse">
+          <circle cx="3.5" cy="3.5" r="0.3" fill="rgba(255,255,255,0.025)"/>
+        </pattern>
+
+        <!-- 搜索边线流动动画 -->
       </defs>
+
+      <!-- 点阵背景层（跟随变换） -->
+      <rect x="0" y="0" :width="svgWidth" :height="svgHeight" fill="url(#dot-grid-small)" />
+      <rect x="0" y="0" :width="svgWidth" :height="svgHeight" fill="url(#dot-grid)" />
 
       <g :transform="`translate(${tx}, ${ty}) scale(${scale})`">
         <!-- 边线 -->
@@ -597,10 +782,13 @@ onUnmounted(() => {
         <!-- 边标签 -->
         <text
           v-for="edge in edges"
-          :key="`label-${edge.source}-${edge.target}`"
+          :key="`label-${edge.source}-${edge.target}-${edge.rel_type}`"
           :x="edgeLabelPos(edge).x"
           :y="edgeLabelPos(edge).y"
           class="edge-label"
+          :class="{
+            'edge-label-dim': filteredNodeIds && !highlightedEdges?.has(`${edge.source}|${edge.target}`),
+          }"
         >{{ edge.rel_type }}</text>
 
         <!-- 节点 -->
@@ -610,7 +798,7 @@ onUnmounted(() => {
           class="node-group"
           :class="{
             'node-selected': selectedId === node.id,
-            'node-user': node.type === 'User',
+            'node-user': isRootNode(node),
             'node-highlight': filteredNodeIds?.has(node.id),
             'node-dim': filteredNodeIds && !filteredNodeIds.has(node.id),
           }"
@@ -624,6 +812,31 @@ onUnmounted(() => {
             :cy="node.y"
             :r="nodeRadius(node.type) + 8"
             class="node-aura"
+          />
+          <!-- 轨道环 -->
+          <ellipse
+            v-if="!isRootNode(node)"
+            :cx="node.x"
+            :cy="node.y"
+            :rx="nodeRadius(node.type) + 13"
+            :ry="nodeRadius(node.type) + 7"
+            class="node-orbit"
+            :style="{ stroke: nodeColor(node.type) }"
+          />
+          <!-- 脉冲环 -->
+          <circle
+            v-if="getPulseType(node) === 'double'"
+            :cx="node.x"
+            :cy="node.y"
+            :r="nodeRadius(node.type) + 10"
+            class="node-pulse-ring ring-1"
+          />
+          <circle
+            v-if="getPulseType(node) === 'double'"
+            :cx="node.x"
+            :cy="node.y"
+            :r="nodeRadius(node.type) + 22"
+            class="node-pulse-ring ring-2"
           />
           <!-- 主圆 -->
           <circle
@@ -642,13 +855,21 @@ onUnmounted(() => {
             fill="rgba(255,255,255,0.15)"
             class="node-shine"
           />
+          <!-- 类型图标 -->
+          <text
+            :x="node.x"
+            :y="node.y + 0.5"
+            class="node-icon"
+            text-anchor="middle"
+            dominant-baseline="central"
+          >{{ nodeIcon(node.type) }}</text>
           <!-- 标签 -->
           <text
             :x="node.x"
             :y="node.y + nodeRadius(node.type) + 14"
             class="node-label"
             text-anchor="middle"
-          >{{ node.type === 'User' ? '🧠' : truncateName(node.name) }}</text>
+          >{{ shouldTruncate(node.type) ? truncateName(node.name) : node.name }}</text>
         </g>
       </g>
     </svg>
@@ -656,13 +877,15 @@ onUnmounted(() => {
     <!-- 底部提示 -->
     <Transition name="search-fade">
       <div v-if="showUI && !loading && !empty" class="graph-hint">
-        🖱 滚轮缩放 · 拖拽平移 · 点击节点 · ⌘F 搜索 · Esc 关闭
+        滚轮缩放 · 拖拽平移 · 点击节点 · Ctrl+F 搜索 · Esc 关闭
       </div>
     </Transition>
 
     <!-- 详情面板 -->
     <Transition name="panel-slide">
       <aside v-if="selectedNode" class="detail-panel">
+        <!-- 顶部装饰线 -->
+        <div class="panel-accent" :style="{ background: nodeColor(selectedNode.type) }" />
         <button class="panel-close" @click="closePanel">
           <svg width="16" height="16" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
         </button>
@@ -674,7 +897,7 @@ onUnmounted(() => {
           </div>
           <div class="panel-titles">
             <span class="panel-name">{{ selectedNode.name }}</span>
-            <span class="panel-type">{{ typeLabel(selectedNode.type) }}</span>
+            <span class="panel-type" :style="{ color: nodeColor(selectedNode.type) }">{{ typeLabel(selectedNode.type) }}</span>
           </div>
         </div>
 
@@ -682,36 +905,50 @@ onUnmounted(() => {
 
         <div v-if="nodeFacts.length > 0" class="panel-section">
           <div class="panel-section-title">
-            <svg width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="4" fill="currentColor" opacity="0.6"/></svg>
+            <svg width="13" height="13" viewBox="0 0 13 13"><rect x="2" y="2" width="9" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.5"/><line x1="5" y1="6.5" x2="7" y2="8.5" stroke="currentColor" stroke-width="1.2" opacity="0.5"/><line x1="7" y1="8.5" x2="10" y2="4.5" stroke="currentColor" stroke-width="1.2" opacity="0.5"/></svg>
             关联事实
           </div>
           <div v-for="(f, i) in nodeFacts" :key="i" class="panel-fact">
-            <span class="fact-type-tag" :style="{ color: nodeColor(f.type), background: nodeColor(f.type) + '18' }">
-              {{ typeLabel(f.type) }}
-            </span>
-            <span class="fact-content">{{ f.content }}</span>
+            <div class="fact-gutter" :style="{ background: nodeColor(f.type) }" />
+            <div class="fact-body">
+              <span class="fact-type-tag" :style="{ color: nodeColor(f.type), background: nodeColor(f.type) + '18' }">
+                {{ typeLabel(f.type) }}
+              </span>
+              <span class="fact-content">{{ f.content }}</span>
+            </div>
           </div>
         </div>
 
         <div v-if="nodeEdges.length > 0" class="panel-section">
           <div class="panel-section-title">
-            <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" stroke-width="1.5" opacity="0.5"/></svg>
+            <svg width="13" height="13" viewBox="0 0 13 13"><circle cx="3.5" cy="6.5" r="2.2" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.5"/><circle cx="9.5" cy="6.5" r="2.2" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.5"/><line x1="5.7" y1="6.5" x2="7.3" y2="6.5" stroke="currentColor" stroke-width="1.2" opacity="0.5"/></svg>
             关联关系
           </div>
           <div v-for="(e, i) in nodeEdges" :key="i" class="panel-rel">
-            <span class="rel-dir">{{ e.source === selectedNode.id ? '→' : '←' }}</span>
-            <span class="rel-type">{{ e.rel_type }}</span>
-            <span class="rel-target">
-              {{ e.source === selectedNode.id
-                ? (nodes.find(n => n.id === e.target)?.name || e.target)
-                : (nodes.find(n => n.id === e.source)?.name || e.source)
-              }}
-            </span>
+            <div class="rel-arrow-wrap">
+              <svg width="16" height="16" viewBox="0 0 16 16" class="rel-arrow-icon">
+                <circle cx="3" cy="8" r="2.5" fill="none" stroke="currentColor" stroke-width="1"/>
+                <line x1="5.5" y1="8" x2="9" y2="8" stroke="currentColor" stroke-width="1"/>
+                <polygon points="13,8 9.5,5 9.5,11" fill="currentColor"/>
+              </svg>
+            </div>
+            <div class="rel-body">
+              <span class="rel-type">{{ e.rel_type }}</span>
+              <span class="rel-target">
+                {{ e.source === selectedNode.id
+                  ? (nodes.find(n => n.id === e.target)?.name || e.target)
+                  : (nodes.find(n => n.id === e.source)?.name || e.source)
+                }}
+              </span>
+            </div>
           </div>
         </div>
 
         <div v-if="nodeFacts.length === 0 && nodeEdges.length === 0" class="panel-empty">
-          <span>🔍</span>
+          <svg width="32" height="32" viewBox="0 0 32 32" fill="none" class="panel-empty-icon">
+            <circle cx="16" cy="16" r="14" stroke="#2a2a42" stroke-width="0.8"/>
+            <path d="M11 16h10M16 11v10" stroke="#2a2a42" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
           <span>暂无关联信息</span>
         </div>
       </aside>
@@ -728,6 +965,20 @@ onUnmounted(() => {
   background: #080812;
   overflow: hidden;
   contain: layout style paint;
+}
+
+/* 径向暗角叠加 + 四角色彩微光 */
+.graph-container::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse at center, transparent 35%, rgba(4,4,10,0.55) 100%),
+    radial-gradient(ellipse at 15% 15%, rgba(99,102,241,0.04) 0%, transparent 50%),
+    radial-gradient(ellipse at 85% 85%, rgba(139,92,246,0.03) 0%, transparent 50%),
+    radial-gradient(ellipse at 85% 15%, rgba(59,130,246,0.02) 0%, transparent 40%);
 }
 
 /* 粒子画布 */
@@ -747,14 +998,21 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: rgba(16,16,28,0.9);
-  backdrop-filter: blur(16px);
+  background: rgba(14,14,32,0.94);
+  backdrop-filter: blur(20px);
   border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 12px;
-  padding: 8px 14px;
+  border-radius: 14px;
+  padding: 9px 14px;
   z-index: 15;
-  min-width: 320px;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  min-width: 340px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 0 0 rgba(99,102,241,0);
+  transition: border-color 0.35s, box-shadow 0.35s, background 0.35s;
+}
+
+.search-bar:focus-within {
+  border-color: rgba(139, 92, 246, 0.45);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 24px rgba(99,102,241,0.15), 0 0 0 1px rgba(139,92,246,0.15);
+  background: rgba(16,16,36,0.96);
 }
 
 .search-icon {
@@ -814,14 +1072,15 @@ onUnmounted(() => {
   top: 14px;
   right: 18px;
   display: flex;
-  gap: 14px;
-  font-size: 0.7rem;
+  gap: 16px;
+  font-size: 0.68rem;
   z-index: 5;
-  padding: 6px 12px;
-  background: rgba(16,16,28,0.7);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255,255,255,0.04);
+  padding: 7px 14px;
+  background: rgba(14,14,32,0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.06);
   border-radius: 20px;
+  letter-spacing: 0.02em;
 }
 
 .stat-item {
@@ -840,6 +1099,52 @@ onUnmounted(() => {
   background: var(--c, #5a5a72);
 }
 
+/* ===== 类型图例 ===== */
+.type-legend {
+  position: absolute;
+  bottom: 48px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  justify-content: center;
+  z-index: 5;
+  padding: 8px 16px;
+  background: rgba(10,10,26,0.85);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 24px;
+  max-width: 92%;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+}
+
+.legend-chip {
+  font-size: 0.6rem;
+  color: #7a7a94;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+  transition: color 0.2s, transform 0.2s;
+  cursor: default;
+}
+
+.legend-chip::before {
+  content: '';
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--c, #7a7a94);
+  box-shadow: 0 0 4px var(--c, #7a7a94);
+}
+
+.legend-chip:hover {
+  color: #d4d4e8;
+  transform: translateY(-1px);
+}
+
 /* ===== 加载 / 空状态 ===== */
 .graph-status {
   display: flex;
@@ -852,36 +1157,69 @@ onUnmounted(() => {
   z-index: 1;
 }
 
-.loader-ring {
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  background: conic-gradient(from 0deg, transparent, #6366f1, #a78bfa, transparent);
-  animation: ring-spin 1.2s linear infinite;
+/* 轨道加载器 */
+.orbit-loader {
+  position: relative;
+  width: 60px;
+  height: 60px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.loader-ring-inner {
-  width: 28px;
-  height: 28px;
+.orbit-core {
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: #0c0c18;
+  background: #a78bfa;
+  box-shadow: 0 0 12px rgba(139, 92, 246, 0.5), 0 0 24px rgba(139, 92, 246, 0.25);
+  z-index: 1;
 }
 
-@keyframes ring-spin {
+.orbit-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  opacity: 0.5;
+}
+
+.o-1 {
+  border-color: rgba(139, 92, 246, 0.3);
+  animation: orbit-spin 2.4s linear infinite;
+}
+
+.o-2 {
+  inset: 8px;
+  border-color: rgba(99, 102, 241, 0.25);
+  animation: orbit-spin 1.8s linear infinite reverse;
+}
+
+.o-3 {
+  inset: 16px;
+  border-color: rgba(168, 85, 247, 0.2);
+  animation: orbit-spin 3s linear infinite;
+}
+
+@keyframes orbit-spin {
+  from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
 
 .loading-text {
   color: #4a4a60;
   font-size: 0.85rem;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
+  animation: loading-fade 2s ease-in-out infinite;
 }
 
-.empty-icon {
-  opacity: 0.35;
+@keyframes loading-fade {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+.empty-illustration {
+  opacity: 0.4;
   margin-bottom: 0.25rem;
 }
 
@@ -914,28 +1252,50 @@ onUnmounted(() => {
   fill: none;
   stroke: url(#edge-grad);
   stroke-width: 0.7;
-  transition: stroke 0.4s, stroke-width 0.4s, opacity 0.4s;
+  stroke-linecap: round;
+  transition: stroke 0.5s, stroke-width 0.5s, opacity 0.5s;
 }
 
 .graph-edge.edge-highlight {
   stroke: url(#edge-highlight);
-  stroke-width: 1.4;
+  stroke-width: 1.5;
+  stroke-dasharray: 10 6;
+  animation: dash-flow 1.2s linear infinite;
+  filter: drop-shadow(0 0 3px rgba(180,180,240,0.3));
 }
 
 .graph-edge.edge-dim {
-  opacity: 0.10;
+  opacity: 0.08;
+}
+
+@keyframes dash-flow {
+  to { stroke-dashoffset: -32; }
+}
+
+@keyframes dash-pulse {
+  0%, 100% { stroke-opacity: 0.3; }
+  50% { stroke-opacity: 1; }
 }
 
 /* ===== 边标签 ===== */
 .edge-label {
-  fill: #36364a;
+  fill: #5a5a70;
   font-size: 8px;
   font-weight: 500;
   text-anchor: middle;
   pointer-events: none;
   user-select: none;
   letter-spacing: 0.03em;
+  paint-order: stroke;
+  stroke: rgba(4, 4, 12, 0.75);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
   transition: fill 0.4s, opacity 0.4s;
+}
+
+.edge-label-dim {
+  opacity: 0.1;
 }
 
 /* ===== 节点 ===== */
@@ -989,6 +1349,18 @@ onUnmounted(() => {
   transition: opacity 0.3s;
 }
 
+.node-icon {
+  fill: rgba(255,255,255,0.85);
+  font-size: 11px;
+  pointer-events: none;
+  user-select: none;
+  transition: fill 0.3s;
+}
+
+.node-user .node-icon {
+  font-size: 13px;
+}
+
 .node-aura {
   fill: none;
   stroke: rgba(255,255,255,0.06);
@@ -1007,15 +1379,86 @@ onUnmounted(() => {
   stroke: rgba(255,255,255,0.15);
 }
 
+/* ===== 节点轨道环 ===== */
+.node-orbit {
+  fill: none;
+  stroke-opacity: 0.12;
+  stroke-width: 0.8;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.4s, stroke-opacity 0.4s;
+  transform-origin: var(--ox) var(--oy);
+  animation: orbit-rotate 8s linear infinite;
+}
+
+.node-group:hover .node-orbit,
+.node-selected .node-orbit,
+.node-highlight .node-orbit {
+  opacity: 1;
+  stroke-opacity: 0.3;
+}
+
+@keyframes orbit-rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* User 双层脉冲 */
+.node-pulse-ring {
+  fill: none;
+  stroke: rgba(245, 158, 11, 0.3);
+  stroke-width: 1;
+  pointer-events: none;
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.ring-1 {
+  animation: pulse-ring 2.2s ease-out infinite;
+}
+
+.ring-2 {
+  animation: pulse-ring 2.2s ease-out 0.75s infinite;
+}
+
+.node-group:hover .node-pulse-ring,
+.node-selected .node-pulse-ring,
+.node-highlight .node-pulse-ring {
+  opacity: 1;
+}
+
+@keyframes pulse-ring {
+  0% {
+    stroke-opacity: 0.6;
+    stroke-width: 1.2;
+    transform: scale(1);
+  }
+  100% {
+    stroke-opacity: 0;
+    stroke-width: 0.3;
+    transform: scale(1.8);
+  }
+}
+
 .node-label {
   fill: #c8c8d8;
   font-size: 10px;
   font-weight: 500;
   pointer-events: none;
   user-select: none;
-  text-shadow: 0 1px 4px rgba(0,0,0,0.7);
-  letter-spacing: 0.02em;
+  text-shadow: 0 1px 6px rgba(0,0,0,0.8), 0 0 3px rgba(0,0,0,0.5);
+  letter-spacing: 0.03em;
   transition: fill 0.3s, opacity 0.3s;
+}
+
+.node-group:hover .node-label {
+  fill: #f0f0f8;
+}
+
+.node-selected .node-label {
+  fill: #ffffff;
+  font-weight: 600;
 }
 
 /* ===== 底部提示 ===== */
@@ -1024,15 +1467,15 @@ onUnmounted(() => {
   bottom: 14px;
   left: 50%;
   transform: translateX(-50%);
-  font-size: 0.68rem;
-  color: #2a2a3e;
+  font-size: 0.66rem;
+  color: #2e2e46;
   pointer-events: none;
   z-index: 2;
-  letter-spacing: 0.05em;
-  background: rgba(8,8,16,0.7);
-  padding: 4px 14px;
+  letter-spacing: 0.04em;
+  background: rgba(8,8,16,0.65);
+  padding: 4px 16px;
   border-radius: 20px;
-  border: 1px solid rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.03);
 }
 
 /* ===== 详情面板 ===== */
@@ -1040,31 +1483,42 @@ onUnmounted(() => {
   position: absolute;
   top: 0;
   right: 0;
-  width: 300px;
+  width: 320px;
   height: 100%;
-  background: rgba(14, 14, 24, 0.88);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  border-left: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(10, 10, 26, 0.85);
+  backdrop-filter: blur(28px) saturate(1.4);
+  -webkit-backdrop-filter: blur(28px) saturate(1.4);
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
   padding: 1.5rem;
   overflow-y: auto;
   z-index: 10;
-  box-shadow: -8px 0 32px rgba(0,0,0,0.4);
+  box-shadow: -16px 0 48px rgba(0,0,0,0.5), inset 1px 0 0 rgba(255,255,255,0.02);
+}
+
+/* 顶部装饰线 */
+.panel-accent {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  opacity: 0.6;
 }
 
 /* 面板入场动画 */
 .panel-slide-enter-active {
-  transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .panel-slide-leave-active {
-  transition: all 0.25s ease-in;
+  transition: all 0.3s cubic-bezier(0.5, 0, 0.75, 0);
 }
 .panel-slide-enter-from {
   transform: translateX(100%);
   opacity: 0;
+  backdrop-filter: blur(0px);
 }
 .panel-slide-leave-to {
-  transform: translateX(60%);
+  transform: translateX(80%);
   opacity: 0;
 }
 
@@ -1174,19 +1628,52 @@ onUnmounted(() => {
   font-size: 0.8rem;
   color: #9a9ab0;
   line-height: 1.55;
-  padding: 0.5rem 0.6rem;
-  margin-bottom: 0.25rem;
-  background: rgba(255,255,255,0.015);
-  border-radius: 8px;
-  border: 1px solid rgba(255,255,255,0.03);
+  margin-bottom: 0.35rem;
+  background: rgba(255,255,255,0.02);
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.04);
   display: flex;
-  gap: 0.5rem;
-  align-items: flex-start;
-  transition: background 0.2s;
+  overflow: hidden;
+  transition: background 0.2s, transform 0.2s, border-color 0.2s;
+  animation: fact-enter 0.4s ease both;
+}
+
+.panel-fact:nth-child(2) { animation-delay: 0.05s; }
+.panel-fact:nth-child(3) { animation-delay: 0.10s; }
+.panel-fact:nth-child(4) { animation-delay: 0.15s; }
+.panel-fact:nth-child(5) { animation-delay: 0.20s; }
+.panel-fact:nth-child(6) { animation-delay: 0.25s; }
+
+@keyframes fact-enter {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .panel-fact:hover {
-  background: rgba(255,255,255,0.03);
+  background: rgba(255,255,255,0.05);
+  border-color: rgba(255,255,255,0.10);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+.fact-gutter {
+  width: 3px;
+  flex-shrink: 0;
+  opacity: 0.4;
+  border-radius: 0 2px 2px 0;
+  transition: opacity 0.2s;
+}
+
+.panel-fact:hover .fact-gutter {
+  opacity: 0.8;
+}
+
+.fact-body {
+  flex: 1;
+  padding: 0.5rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
 }
 
 .fact-type-tag {
@@ -1205,26 +1692,55 @@ onUnmounted(() => {
 .panel-rel {
   font-size: 0.8rem;
   color: #9a9ab0;
-  padding: 0.4rem 0.6rem;
-  margin-bottom: 0.25rem;
-  background: rgba(255,255,255,0.015);
-  border-radius: 8px;
-  border: 1px solid rgba(255,255,255,0.03);
+  margin-bottom: 0.35rem;
+  background: rgba(255,255,255,0.02);
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.04);
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  transition: background 0.2s;
+  gap: 0;
+  overflow: hidden;
+  transition: background 0.2s, transform 0.2s, border-color 0.2s;
+  animation: fact-enter 0.4s ease both;
 }
+
+.panel-rel:nth-child(2) { animation-delay: 0.05s; }
+.panel-rel:nth-child(3) { animation-delay: 0.10s; }
+.panel-rel:nth-child(4) { animation-delay: 0.15s; }
+.panel-rel:nth-child(5) { animation-delay: 0.20s; }
 
 .panel-rel:hover {
-  background: rgba(255,255,255,0.03);
+  background: rgba(255,255,255,0.05);
+  border-color: rgba(255,255,255,0.10);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
 }
 
-.rel-dir {
-  color: #4a4a5e;
-  font-size: 0.85rem;
+.rel-arrow-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem 0.4rem 0.5rem 0.6rem;
   flex-shrink: 0;
-  font-weight: 300;
+}
+
+.rel-arrow-icon {
+  color: #4a4a62;
+  opacity: 0.5;
+  transition: opacity 0.2s, color 0.2s;
+}
+
+.panel-rel:hover .rel-arrow-icon {
+  opacity: 0.8;
+  color: #8b8baa;
+}
+
+.rel-body {
+  flex: 1;
+  padding: 0.5rem 0.6rem 0.5rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
 }
 
 .rel-type {
@@ -1247,11 +1763,15 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.75rem;
   color: #3a3a4e;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   text-align: center;
-  padding: 2.5rem 0;
+  padding: 3rem 0;
+}
+
+.panel-empty-icon {
+  opacity: 0.25;
 }
 
 /* ===== 滚动条 ===== */

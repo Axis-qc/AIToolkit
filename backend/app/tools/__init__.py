@@ -35,7 +35,12 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "save_to_graph",
-            "description": "将重要信息保存到知识图谱。当用户表达偏好、事实、经历、计划等值得记住的内容时调用。",
+            "description": (
+                "将重要信息保存到知识图谱。当用户表达偏好、事实、经历、计划等值得记住的内容时调用。"
+                " relations 中 from 指向归属中心（from_type='User', from_name='AXIS' 表示用户内容，"
+                " from_type='AI', from_name='Midnight' 表示 AI 规则，from_type='Project', from_name='AIChat' 表示项目内容），"
+                "跨中心实体可多条 relations。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

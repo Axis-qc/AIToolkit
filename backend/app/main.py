@@ -8,6 +8,7 @@ from app.core import graph
 from app.core import logger
 from app.core.config import settings
 from app.core import file_guard
+from app.core.cache import cache
 from app.api.chat import router as chat_router
 from app.api.graph import router as graph_router
 
@@ -19,9 +20,11 @@ async def lifespan(app: FastAPI):
     logger.init()
     await graph.init_db()
     file_guard.init(settings.whitelist_paths)
+    cache.load_from_disk()
 
     yield
 
+    cache.save_to_disk()
     await graph.close()
     logger.close()
 

@@ -1,11 +1,11 @@
 import json
 from datetime import datetime
-from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Body, HTTPException
 from openai import AsyncOpenAI
 
+from app.core import config_loader
 from app.core import memory
 from app.core import storage
 from app.core import graph as graph_core
@@ -26,7 +26,8 @@ client = AsyncOpenAI(
     base_url=settings.chat_base_url,
 )
 
-UPDATE_SYSTEM_PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "graph_update.txt").read_text(encoding="utf-8")
+UPDATE_SYSTEM_PROMPT = config_loader.render_prompt("graph_update",
+    center_list=config_loader.build_center_list_md())
 
 
 @router.post("/api/chat/update-graph")
@@ -129,3 +130,14 @@ async def delete_conv(conv_id: str) -> dict[str, str]:
 @router.get("/api/graph")
 async def get_graph():
     return await graph_core.get_all_graph()
+
+
+@router.get("/api/graph/config")
+async def get_graph_config():
+    return {
+        "centers": config_loader.get_centers(),
+        "entity_types": config_loader.get_entity_types(),
+        "default_render": config_loader.get_all_config()["default_render"],
+        "root_node_ids": config_loader.get_root_node_ids(),
+        "injection": config_loader.get_injection_config(),
+    }
