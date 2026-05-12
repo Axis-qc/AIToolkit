@@ -87,6 +87,51 @@ def build_center_list_md() -> str:
     return "\n".join(lines)
 
 
+def get_center_categories(type_: str, name: str) -> list[dict]:
+    """获取某个中心的分类节点列表"""
+    center = get_center(type_, name)
+    return center.get("categories", []) if center else []
+
+
+def get_all_categories() -> list[dict]:
+    """获取所有中心的分类节点，附带父中心信息"""
+    result = []
+    for c in _load()["centers"]:
+        for cat in c.get("categories", []):
+            result.append({
+                "center_type": c["type"],
+                "center_name": c["name"],
+                "entity_name": f"{c['name']}·{cat['name']}",
+                "name": cat["name"],
+                "icon": cat.get("icon", "\U0001F4C1"),
+                "description": cat.get("description", ""),
+            })
+    return result
+
+
+def build_category_list_md() -> str:
+    """生成分类节点 Markdown 列表，用于注入提示词"""
+    lines = []
+    for c in _load()["centers"]:
+        cats = c.get("categories", [])
+        if cats:
+            cat_names = "、".join(f"{c['name']}·{cat['name']}" for cat in cats)
+            lines.append(f"- {c['icon']} **{c['type']}|{c['name']}** 的分类: {cat_names}")
+    return "\n".join(lines)
+
+
+def get_category_center_map() -> dict:
+    """返回 {分类实体名: {center_type, center_name}} 映射"""
+    result = {}
+    for c in _load()["centers"]:
+        for cat in c.get("categories", []):
+            result[f"{c['name']}·{cat['name']}"] = {
+                "center_type": c["type"],
+                "center_name": c["name"],
+            }
+    return result
+
+
 def get_root_relations() -> list[dict]:
     return _load().get("root_relations", [])
 

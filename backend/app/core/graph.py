@@ -120,6 +120,20 @@ async def init_db():
             (from_type, from_name, to_type, to_name, rel_type),
         )
 
+    # 自动创建分类实体及与根中心的「包含」关系
+    for cat in config_loader.get_all_categories():
+        cat_name = cat["entity_name"]
+        await db.execute(
+            "INSERT OR IGNORE INTO entities (name, type, properties, importance, pinned)"
+            " VALUES (?, 'category', '{}', 10, 1)",
+            (cat_name,),
+        )
+        await db.execute(
+            "INSERT OR IGNORE INTO relations (from_type, from_name, to_type, to_name, rel_type, properties)"
+            " VALUES (?, ?, 'category', ?, '包含', '{}')",
+            (cat["center_type"], cat["center_name"], cat_name),
+        )
+
     await db.commit()
 
 
@@ -196,6 +210,24 @@ async def search_entities(query: str, top_k: int) -> list[dict]:
             "center_name": row['from_name'],
             "rel_type": row['rel_type'],
         })
+
+    # 解析分类链：将 category 类型的 from 追溯到其父根中心
+    center_ids = config_loader.get_center_ids()
+    cat_center_map = config_loader.get_category_center_map()
+    for key, rels in center_map.items():
+        resolved = []
+        for rel in rels:
+            ckey = f"{rel['center_type']}|{rel['center_name']}"
+            if ckey in center_ids:
+                resolved.append(rel)
+            elif rel["center_name"] in cat_center_map:
+                cc = cat_center_map[rel["center_name"]]
+                resolved.append({
+                    "center_type": cc["center_type"],
+                    "center_name": cc["center_name"],
+                    "rel_type": rel["rel_type"],
+                })
+        center_map[key] = resolved if resolved else rels
 
     results = []
     for name, etype, props_json, importance, pinned, score in scored[:top_k]:
@@ -457,6 +489,24 @@ async def get_pinned_entities() -> list[dict]:
             "rel_type": row['rel_type'],
         })
 
+    # 解析分类链：将 category 类型的 from 追溯到其父根中心
+    center_ids = config_loader.get_center_ids()
+    cat_center_map = config_loader.get_category_center_map()
+    for key, rels in center_map.items():
+        resolved = []
+        for rel in rels:
+            ckey = f"{rel['center_type']}|{rel['center_name']}"
+            if ckey in center_ids:
+                resolved.append(rel)
+            elif rel["center_name"] in cat_center_map:
+                cc = cat_center_map[rel["center_name"]]
+                resolved.append({
+                    "center_type": cc["center_type"],
+                    "center_name": cc["center_name"],
+                    "rel_type": rel["rel_type"],
+                })
+        center_map[key] = resolved if resolved else rels
+
     results = []
     # 一次性拉取所有事实
     facts_cur = await db.execute("SELECT content, type, about_entities FROM facts")
@@ -539,3 +589,160 @@ async def get_all_graph() -> dict:
         })
 
     return {"nodes": nodes, "edges": edges, "facts": facts}
+
+
+async def get_roots() -> dict:
+    """返回根节点：优先 root_node_ids 配置，否则取无入边的实体"""
+    db = await _connect()
+    root_ids = config_loader.get_root_node_ids()
+
+    if root_ids:
+        nodes = []
+        for rid in root_ids:
+            parts = rid.split("|", 1)
+            if len(parts) != 2:
+                continue
+            etype, ename = parts
+            cur = await db.execute(
+                "SELECT name, type, properties, importance, pinned FROM entities WHERE name=? AND type=?",
+                (ename, etype),
+            )
+            row = await cur.fetchone()
+            if row:
+                nodes.append({
+                    "id": rid,
+                    "name": row["name"],
+                    "type": row["type"],
+                    "importance": row["importance"],
+                    "pinned": bool(row["pinned"]),
+                })
+    else:
+        cur = await db.execute("SELECT name, type, properties, importance, pinned FROM entities")
+        all_entities = await cur.fetchall()
+        cur = await db.execute("SELECT DISTINCT to_type, to_name FROM relations")
+        has_incoming = set(f"{r['to_type']}|{r['to_name']}" for r in await cur.fetchall())
+        nodes = []
+        for row in all_entities:
+            eid = f"{row['type']}|{row['name']}"
+            if eid not in has_incoming:
+                nodes.append({
+                    "id": eid,
+                    "name": row["name"],
+                    "type": row["type"],
+                    "importance": row["importance"],
+                    "pinned": bool(row["pinned"]),
+                })
+
+    return {"nodes": nodes, "edges": []}
+
+
+async def get_children(entity_type: str, entity_name: str) -> dict:
+    """返回指定实体的直接子节点和关系边"""
+    db = await _connect()
+
+    cur = await db.execute(
+        "SELECT to_type, to_name, rel_type FROM relations WHERE from_type=? AND from_name=?",
+        (entity_type, entity_name),
+    )
+    relation_rows = await cur.fetchall()
+
+    child_keys = {}
+    for r in relation_rows:
+        key = f"{r['to_type']}|{r['to_name']}"
+        if key not in child_keys:
+            child_keys[key] = (r['to_type'], r['to_name'])
+
+    if not child_keys:
+        return {"nodes": [], "edges": [], "has_children": {}}
+
+    nodes = []
+    for key, (ttype, tname) in child_keys.items():
+        cur = await db.execute(
+            "SELECT name, type, properties, importance, pinned FROM entities WHERE name=? AND type=?",
+            (tname, ttype),
+        )
+        row = await cur.fetchone()
+        if row:
+            nodes.append({
+                "id": key,
+                "name": row["name"],
+                "type": row["type"],
+                "importance": row["importance"],
+                "pinned": bool(row["pinned"]),
+            })
+
+    edges = [
+        {
+            "source": f"{entity_type}|{entity_name}",
+            "target": f"{r['to_type']}|{r['to_name']}",
+            "rel_type": r["rel_type"],
+        }
+        for r in relation_rows
+    ]
+
+    # 批量查询子节点是否有 outgoing 边（单 SQL 避免 N+1）
+    if child_keys:
+        placeholders = ",".join("(?,?)" for _ in child_keys)
+        flat = [x for key in child_keys.values() for x in key]
+        cur = await db.execute(f"""
+            SELECT from_type, from_name, COUNT(*) AS cnt
+            FROM relations
+            WHERE (from_type, from_name) IN ({placeholders})
+            GROUP BY from_type, from_name
+        """, flat)
+        has_outgoing = {f"{r['from_type']}|{r['from_name']}": r['cnt'] > 0 for r in await cur.fetchall()}
+    else:
+        has_outgoing = {}
+
+    has_children = {key: has_outgoing.get(key, False) for key in child_keys}
+
+    return {"nodes": nodes, "edges": edges, "has_children": has_children}
+
+
+async def get_orphans() -> dict:
+    """返回所有无边孤岛实体（排除根节点）"""
+    db = await _connect()
+    root_ids = config_loader.get_root_node_ids()
+
+    cur = await db.execute("SELECT name, type, properties, importance, pinned FROM entities")
+    all_entities = await cur.fetchall()
+
+    cur = await db.execute("SELECT DISTINCT from_type, from_name FROM relations UNION SELECT DISTINCT to_type, to_name FROM relations")
+    connected = set(f"{r['from_type']}|{r['from_name']}" for r in await cur.fetchall())
+
+    nodes = []
+    for row in all_entities:
+        eid = f"{row['type']}|{row['name']}"
+        if eid not in connected and eid not in root_ids:
+            nodes.append({
+                "id": eid,
+                "name": row["name"],
+                "type": row["type"],
+                "importance": row["importance"],
+                "pinned": bool(row["pinned"]),
+            })
+
+    return {"nodes": nodes}
+
+
+async def get_facts(entity_type: str, entity_name: str) -> dict:
+    """返回指定实体的记忆事实（使用 SQL json_each 避免全量拉取）"""
+    db = await _connect()
+    cur = await db.execute(
+        "SELECT id, content, type, about_entities, ts FROM facts WHERE EXISTS ("
+        "  SELECT 1 FROM json_each(about_entities) WHERE value = ?"
+        ") ORDER BY ts DESC LIMIT 50",
+        (entity_name,),
+    )
+    rows = await cur.fetchall()
+    facts = [
+        {
+            "id": r["id"],
+            "content": r["content"],
+            "type": r["type"],
+            "about_entities": json.loads(r["about_entities"]),
+            "ts": r["ts"],
+        }
+        for r in rows
+    ]
+    return {"facts": facts}

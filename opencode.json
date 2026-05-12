@@ -16,5 +16,21 @@
         "MEMORY_FILE_PATH": "G:\\games\\AIChat\\memory.jsonl"
       }
     }
+  },
+  "provider": {
+    "Cherry-深度求索": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Cherry-深度求索",
+      "options": {
+        "apiKey": "{env:OPENCODE_API_KEY_深度求索}",
+        "baseURL": "https://api.deepseek.com/v1"
+      },
+      "models": {
+        "deepseek-v4-flash": {
+          "name": "deepseek-v4-flash",
+          "reasoning": true
+        }
+      }
+    }
   }
 }

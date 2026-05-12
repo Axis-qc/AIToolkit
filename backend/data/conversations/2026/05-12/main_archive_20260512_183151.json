@@ -1,0 +1,411 @@
+{
+  "id": "main_archive_20260512_183151",
+  "title": "记忆图谱渲染超过100个节点就开始严重掉帧了 (归档)",
+  "created_at": "2026-05-12T10:31:51.164794",
+  "updated_at": "2026-05-12T10:31:51.164794",
+  "archived": true,
+  "last_prompt_tokens": 30915,
+  "messages": [
+    {
+      "role": "user",
+      "content": "记忆图谱渲染超过100个节点就开始严重掉帧了",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "让我先看看当前 GraphCanvas.vue 的渲染实现，定位性能瓶颈。找到了，让我看看 GraphCanvas.vue 的规模，然后分页读取。1210 行，按 200 行分页读取。我已经完整阅读了 `GraphCanvas.vue`（1347行）。先说结论：\n\n---\n\n## 瓶颈定位\n\n**核心问题不在力模拟算法，而在 Vue 的 SVG 渲染管线。**\n\n当前架构：\n- `forceLoop()` 每帧调用 `stepForce()`，修改每个节点的 `x`、`y`、`opacity`\n- Vue 响应式系统检测到变化 → 触发虚拟 DOM diff → 操作 SVG DOM\n- 100 节点 × ~9 个 SVG 子元素 + 边线 path + 边标签 = **1100+ 个 SVG DOM 节点**\n- 每帧都在做这些操作，浏览器 Layout/Paint 跟不上\n\n力模拟本身已经做了空间哈希优化（O(N) 排斥力），不是瓶颈。**瓶颈在 Vue ↔ SVG DOM 这层。**\n\n---\n\n## 三个方案\n\n### 方案 A：绕过 Vue 响应式，raf 中直接操作 SVG DOM（改动最小）\n- 在 `forceLoop` 中不修改响应式 `nodes.value`，改为通过 `svgRef` 拿到 `<g>` 元素直接改 `transform` 属性\n- 节点位置移动变成纯 DOM 操作，不触发 Vue 虚拟 DOM diff\n- 但 hover/click/选中等 CSS 交互仍然依赖 Vue，改动后需要重新对齐\n- **工作量**：中等，风险较高（两套更新机制容易出 bug）\n\n### 方案 B：将节点+边从 SVG 迁移到 Canvas 2D（推荐）\n- 粒子背景已经在 Canvas 上了，把节点和边也画到 Canvas 上\n- 彻底脱离 Vue 响应式系统，在 raf 中直接绘制\n- 100 节点可以稳定 60fps\n- 交互（hover、click、drag）需要在 Canvas 上手写 hit-test，但逻辑不复杂\n- **工作量**：中等偏大，但长期收益明显。失去的是 CSS glow/filter 等视觉效果（需要在 Canvas 上重画）\n\n### 方案 C：WebGL（Three.js/PixiJS）\n- 性能天花板最高，1000+ 节点无压力\n- 但引入新依赖，视觉效果重建成本高\n- **工作量**：大，对当前项目有点过度设计\n\n---\n\n**我推荐方案 B**——Canvas 2D 渲染节点和边。SVG 适合静态/低频更新的图形，高频动画场景天然属于 Canvas。\n\n要我展开方案 B 的具体改造计划吗？还是你倾向于某个方向？",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "user",
+      "content": "先把8F%E6%B8%90%E8%BF%9B%E6%B8%B2%E6%9F%93%E8%AE%A1%E5%88%92 HTTP/1.1\" 200 OK INFO:     127.0.0.1:55744 - \"GET /api/graph/children?type=Project&name=AIChat HTTP/1.1\" 200 OK INFO:     127.0.0.1:55747 - \"GET /api/graph/children?type=category&name=AXIS%C2%B7%E8%AE%A1%E5%88%92%E7%9B%AE%E6%A0%87 HTTP/1.1\" 200 OK INFO:     127.0.0.1:55745 - \"GET /api/graph/children?type=category&name=AXIS%C2%B7%E4%BA%8B%E5%AE%9E%E7%BB%8F%E5%8E%86 HTTP/1.1\" 200 OK INFO:     127.0.0.1:55746 - \"GET /api/graph/children?type=category&name=AXIS%C2%B7%E5%81%8F%E5%A5%BD%E4%B9%A0%E6%83%AF HTTP/1.1\" 200 OK INFO:     127.0.0.1:60615 - \"GET /api/graph/children?type=incident&name=%E6%9C%AA%E7%BB%8F%E7%A1%AE%E8%AE%A4%E7%9B%B4%E6%8E%A5%E6%94%B9%E4%BB%A3%E7%A0%81%E8%BF%9D%E8%A7%84 HTTP/1.1\" 200 OK INFO:     127.0.0.1:60616 - \"GET /api/graph/children?type=rule&name=%E4%BF%AE%E6%AD%A3%E8%AE%B0%E5%BF%86%E5%8E%9F%E5%88%99 HTTP/1.1\" 200 OK INFO:     127.0.0.1:60614 - \"GET /api/graph/children?type=AI&name=Midnight HTTP/1.1\" 200 OK INFO:     127.0.0.1:50534 - \"GET /api/graph/children?type=component&name=GraphCanvas.vue HTTP/1.1\" 200 OK INFO:     127.0.0.1:59569 - \"GET /ap知识图谱无限请求的bug修了。没在界面就不要请求了",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "找到根因了。\n\n## 根因\n\n`onUnmounted` 清理时**没有设置 `spawnAborted = true`**，导致组件卸载后 `spawnLoop` 这个 async 函数继续跑——里面的 `fetchChildren` 请求照发不误。\n\n```javascript\n// 当前 onUnmounted（line 774-785）\nonUnmounted(() => {\n  document.removeEventListener('keydown', onKeyDown)\n  cancelAnimationFrame(animFrame.value)   // ← 只杀了渲染循环\n  cancelAnimationFrame(forceLoopId)       // ← 只杀了力模拟\n  // ❌ spawnAborted 没设，spawnLoop 继续飞\n  ...\n})\n```\n\n`spawnLoop` 是个带 `await setTimeout` 的 while 循环，每层拉 5 个并发请求，组件卸载后它不受影响，继续把整棵树请求完。\n\n## 修法\n\n在 `onUnmounted` 加两行：\n\n```javascript\nspawnAborted = true\nisSpawning = false\n```\n\n`spawnLoop` 里本就有 `if (spawnAborted) break` 检查（line 577），只是卸载时没人设置这个标志位。\n\n要我改吗？",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "[记忆检索结果]\n[记忆检索结果]\n## 👤 关于你\n## 关于 读文件限制原则 (重要度 10/10) [固定]\n- [rule] AXIS 要求读文件必须分页读取（offset/limit），不要全量读取，避免大文件消耗过多 token\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 修正记忆原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 AXIS·偏好习惯 (重要度 10/10) [固定]\n- 关联概念：AI主动记忆写入, AXIS, 修正记忆原则, 先确认再动手原则, 可折叠工具调用与代码块\n## 关于 AXIS·计划目标 (重要度 10/10) [固定]\n- 关联概念：AIChat设置功能, AXIS, 多Provider设置功能v2, 文件操作工具集成方案, 缓存落盘优化\n## 关于 AXIS·事实经历 (重要度 10/10) [固定]\n- 关联概念：AI系统架构, AI记忆使用机制, AXIS, ChatView.vue滚动修复, fetch_url工具\n## 关于 先确认再动手原则 (重要度 9/10) [固定]\n- [rule] AI 在工具返回结果前不要发问，应该直接继续行动\n- [preference] AXIS 要求协作准则：先确定问题再动手，不看到一个就改。步骤为：排查确认根因 → 汇报影响范围和改法 → 等确认 → 再动手。\n- [preference] AXIS明确禁止AI在未确认的情况下直接修改代码。即使AI给出方案后用户表达了看法，也必须等用户明确说'改吧'之类的确认词才能动手。任何改动前必须先问'要我改吗？'并等待确认。\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 修正记忆原则, 未经确认直接改代码违规\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 修正记忆原则 (重要度 9/10) [固定]\n- [rule] AXIS 规定：对话中发现知识图谱里的旧记忆有错误，纠正后必须主动更新图谱，不能仅在对话中修正。这是\"先确认再动手\"和\"读文件限制原则\"的配套规则。\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 先确认再动手原则, 读文件限制原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 未经确认直接改代码违规 (重要度 9/10) [固定]\n- [incident] 2025-01-14对话中，AXIS说'缓存不应该一个消息一个消息缓存吗？'，AI将此理解为确认并直接修改了cache.py和chat.py，违反先确认再动手原则。AXIS表示这次算了但下不为例。\n- 关联概念：AXIS·事实经历, Midnight·经验教训, 先确认再动手原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 Midnight (重要度 9/10) [固定]\n- [rule] AI 在工具返回结果前不要发问，应该直接继续行动\n- [rule] AXIS 要求读文件必须分页读取（offset/limit），不要全量读取，避免大文件消耗过多 token\n- [rule] 编辑文件前必须先用 search_files 和 search_content 了解代码结构，不能盲改\n- 关联概念：AIChat, AXIS, Midnight·经验教训, Midnight·能力边界, Midnight·行为规则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 🤖 关于我\n## 关于 读文件限制原则 (重要度 10/10) [固定]\n- [rule] AXIS 要求读文件必须分页读取（offset/limit），不要全量读取，避免大文件消耗过多 token\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 修正记忆原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 Midnight·行为规则 (重要度 10/10) [固定]\n- 关联概念：Midnight, 修正记忆原则, 先确认再动手原则, 图谱不使用emoji, 对话不使用emoji\n## 关于 Midnight·经验教训 (重要度 10/10) [固定]\n- 关联概念：Midnight, 未经确认直接改代码违规, 犯错教训, 编辑文件前未验证路径导致多轮空改\n## 关于 Midnight·能力边界 (重要度 10/10) [固定]\n- 关联概念：Midnight\n## 关于 AXIS (重要度 9/10) [固定]\n- [incident] 2025-01-14对话中，AXIS说'缓存不应该一个消息一个消息缓存吗？'，AI将此理解为确认并直接修改了cache.py和chat.py，违反先确认再动手原则。AXIS表示这次算了但下不为例。\n- [plan] AXIS 在探索给 AI 挂载文件操作工具的方案，让 AI 能在指定目录内修改文件，与知识图谱记忆系统互补\n- [preference] AXIS 对 AI 系统架构设计有浓厚兴趣，并非随意闲聊，在认真探索技术落地路径\n- 关联概念：AIChat, AXIS·事实经历, AXIS·偏好习惯, AXIS·计划目标, Midnight\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 先确认再动手原则 (重要度 9/10) [固定]\n- [rule] AI 在工具返回结果前不要发问，应该直接继续行动\n- [preference] AXIS 要求协作准则：先确定问题再动手，不看到一个就改。步骤为：排查确认根因 → 汇报影响范围和改法 → 等确认 → 再动手。\n- [preference] AXIS明确禁止AI在未确认的情况下直接修改代码。即使AI给出方案后用户表达了看法，也必须等用户明确说'改吧'之类的确认词才能动手。任何改动前必须先问'要我改吗？'并等待确认。\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 修正记忆原则, 未经确认直接改代码违规\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 修正记忆原则 (重要度 9/10) [固定]\n- [rule] AXIS 规定：对话中发现知识图谱里的旧记忆有错误，纠正后必须主动更新图谱，不能仅在对话中修正。这是\"先确认再动手\"和\"读文件限制原则\"的配套规则。\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 先确认再动手原则, 读文件限制原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 未经确认直接改代码违规 (重要度 9/10) [固定]\n- [incident] 2025-01-14对话中，AXIS说'缓存不应该一个消息一个消息缓存吗？'，AI将此理解为确认并直接修改了cache.py和chat.py，违反先确认再动手原则。AXIS表示这次算了但下不为例。\n- 关联概念：AXIS·事实经历, Midnight·经验教训, 先确认再动手原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 📁 项目 AIChat\n## 关于 AIChat·项目规范 (重要度 10/10) [固定]\n- 关联概念：AIChat, 知识图谱视觉克隆修改计划, 请求缓存key计算修复, 通用API配置命名\n## 关于 AIChat·项目架构 (重要度 10/10) [固定]\n- 关联概念：AIChat, AIChat前端架构, AIChat后端架构, AIChat对话存储, AIChat工具系统\n## 关于 AIChat·项目真实结构 (重要度 10/10) [固定]\n- 关联概念：AIChat, ChatView.vue, ChatView.vue归档位置修复, ChatView.vue滚动修复, GraphCanvas.vue\n## 📌 其他\n## 关于 AIChat (重要度 8/10)\n- [topic] .env key 已改为通用命名：API_KEY（原 DEEPSEEK_API_KEY）、API_BASE_URL（原 DEEPSEEK_BASE_URL）、CHAT_MODEL（原 DEEPSEEK_CHAT_MODEL），config.py 同步改名，chat.py 等引用需同步修改\n- [topic] .env 字段设计: CHAT_PROVIDER 决定当前 provider，每个 provider 有独立的 API_KEY/BASE_URL/CHAT_MODEL（如 DEEPSEEK_API_KEY, OPENAI_BASE_URL）。前端按 provider 分标签页，模型下拉框仅显示当前 provider 模型，「拉取模型列表」仅请求对应 provider 的 /v1/models\n- [fact] 2025-01-14 — README.md 完全重写，旧预热器计划已移除，当前只保留设置功能计划；字段名从 DeepSeek 专用改为通用命名以支持多 provider 切换\n- 关联概念：AIChat·项目架构, AIChat·项目真实结构, AIChat·项目规范, AXIS, Midnight\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 知识图谱视觉克隆修改计划 (重要度 9/10)\n- [fact] 2025-01-14 — README.md 知识图谱视觉克隆计划已完全重写。旧计划使用不存在的函数名（nodeIndexMap、selectNode()、drawPanel()），新计划基于实际代码：refresh()(line 641)、onNodeClick()(line 633)、selectedNode/nodeFacts/nodeEdges computed、getPulseType()。每项改动标注了精确行号、插入位置、完整代码示例。实施顺序为 2→5→3→4\n- [fact] 视觉克隆修改计划仅完成1/5：第1项（LayoutNode接口cloneOf字段）已实现，第2-5项（refresh克隆逻辑、selectNode联动、drawPanel聚合、样式继承）均未实现。README.md已于2025-01-14更新为逐项标注状态。\n- 关联概念：AIChat, AIChat·项目规范\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 编辑文件前未验证路径导致多轮空改 (重要度 8/10)\n- [fact] GraphCanvas.vue 的正确路径是 web/AIChat/src/components/graph/GraphCanvas.vue（graph 子目录），而非 components/GraphCanvas.vue。edit_file 工具对不存在路径会静默创建新文件而非报错，导致多轮改动打空。\n- 关联概念：Midnight·经验教训\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 设置功能计划v2 (重要度 8/10)\n- [fact] README.md 已重写为多 provider 设置功能计划，覆盖 .env 重设计、config.py 动态属性、settings.py 多 provider 读写 + 按 provider 拉取模型列表。chat.py/graph.py/memory.py/main.py 无需改动\n- [plan] README.md 已重写为纯设置功能计划，不再包含旧的预热器改造计划。计划覆盖后端 settings.py + config.py 改动、前端 SettingsView.vue + 路由 + HomeView 改动。.env key 使用通用命名 API_KEY / API_BASE_URL / CHAT_MODEL 替代 DEEPSEEK_* 专用命名。\n- 关联概念：AIChat·项目架构, AXIS·计划目标, 通用API配置命名\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 AIChat设置功能 (重要度 8/10)\n- [topic] .env key 已改为通用命名：API_KEY（原 DEEPSEEK_API_KEY）、API_BASE_URL（原 DEEPSEEK_BASE_URL）、CHAT_MODEL（原 DEEPSEEK_CHAT_MODEL），config.py 同步改名，chat.py 等引用需同步修改\n- [fact] 2025-01-14 — README.md 完全重写，旧预热器计划已移除，当前只保留设置功能计划；字段名从 DeepSeek 专用改为通用命名以支持多 provider 切换\n- [topic] 模型列表拉取通过后端代理调用 OpenAI 兼容的 GET /v1/models 接口，超时5秒，失败回退内置兜底列表（含 DeepSeek/OpenAI/Anthropic 常用模型ID）\n- 关联概念：AIChat·项目架构, AXIS·计划目标\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 知识图谱流式渐进渲染计划 (重要度 9/10)\n- [fact] 2025-01-14 — README.md 知识图谱流式渐进渲染计划已审查修正。核心改动：(1) 边=弹力线（胡克定律弹簧），拖动通过弹力线传导整个连通系统；(2) 排斥力使用空间哈希网格 O(n) 替代 O(n²)；(3) 新增 Phase 3 渲染孤岛节点；(4) 新增 GET /api/graph/facts 和 /api/graph/orphans 接口；(5) 力模拟+渲染合并为单一 raf 循环；(6) spawnLoop 明确等本轮子节点全部淡入完+250ms冷却再下一轮\n- [fact] 2025-01-14 — README.md已更新为流式渐进渲染方案：根节点→子节点播种→孙节点播种，持续力模拟，全节点可拖动，无展开收起\n- [preference] AXIS明确要求不需要展开收起节点——所有节点自动无限展开，一旦渲染就永久可见。移除了state字段（collapsed/expanded/loading/leaf），改为简单的loaded标记\n- 关联概念：AIChat, GraphCanvas.vue重写v2, 孤岛节点Phase3, 弹力线模型, 流式播种渲染\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 文件操作工具集成方案 (重要度 9/10)\n- [plan] AXIS 在探索给 AI 挂载文件操作工具的方案，让 AI 能在指定目录内修改文件，与知识图谱记忆系统互补\n- [plan] AXIS在探索给AI添加网页访问能力（HTTP请求工具），这是文件操作工具集成方案的延伸，旨在让AI能同时操作本地文件和远程数据\n- [pending] 待确认：AXIS 目前使用的是什么平台（开源框架如 LangChain/Dify/Coze 还是自建），这决定文件操作工具的具体落地方式\n- 关联概念：AI系统架构, AXIS·计划目标, 知识图谱记忆系统, 网页访问工具\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 知识图谱记忆系统 (重要度 9/10)\n- [topic] 当前记忆系统基于图数据库+API（save_to_graph / search_memory），无法通过文件操作直接修改底层存储\n- 关联概念：AI系统架构, AXIS·事实经历, 文件操作工具集成方案\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 AI主动记忆写入 (重要度 9/10)\n- [fact] AXIS 要求 AI 在对话中主动将重要信息写入知识图谱，而非等到对话结束归档时再处理。已修改 SYSTEM_PROMPT 规则3实现此需求。\n- 关联概念：AXIS·偏好习惯\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 设置功能计划 (重要度 2/10)\n- [plan] AXIS 要求在 README.md 编写设置功能实施计划，准备交给其他 AI 实现。计划已写入根目录 README.md 末尾的「设置功能实现计划」章节。\n- [plan] 设置功能实现方案：后端新增 backend/app/api/settings.py（GET/PUT 读写 .env），前端新增 web/AIChat/src/views/SettingsView.vue（API地址/Key/模型下拉框/预热白名单），路由 /settings，HomeView 卡片改为 available。\n- 关联概念：AIChat·项目架构, AXIS·计划目标, SettingsView.vue, settings.py\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 SettingsView.vue (重要度 2/10)\n- [plan] 设置功能实现方案：后端新增 backend/app/api/settings.py（GET/PUT 读写 .env），前端新增 web/AIChat/src/views/SettingsView.vue（API地址/Key/模型下拉框/预热白名单），路由 /settings，HomeView 卡片改为 available。\n- 关联概念：设置功能计划\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "user",
+      "content": "改",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "改好了。现在 `onUnmounted` 里会先设 `spawnAborted = true` 和 `isSpawning = false`，`spawnLoop` 下一轮循环检测到后会立即 break，不会再发请求。\n\n刷新页面验证一下——离开知识图谱页面后，后端日志应该不会再出现 `/api/graph/children` 请求了。",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "user",
+      "content": "或者知识图谱做成静态的。让我可以手动拖动。保存每个点的位置就行。这个怎么样",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "这个方向不错，我来分析一下。\n\n---\n\n## 静态方案分析\n\n### 好处\n- **性能彻底解决** — 没有力模拟、没有 raf 循环、没有 Vue 响应式高频更新。1000 节点也不会卡。\n- **代码大幅简化** — 砍掉 d3-force、空间哈希、力模拟 ~400 行代码。\n- **用户体验可控** — 位置完全由你决定，不会因为新增节点打乱已有布局。\n- **无后台轮询** — 除了初始加载位置 + 拖动保存，零请求。\n\n### 需要解决的点\n1. **新节点初始位置** — 首次加载的节点没有保存过位置，需要自动分配（网格/环形/螺旋排列）\n2. **新增子节点放哪** — 播种拉回来的子节点，要放在父节点附近还是自动排列\n3. **位置存储** — 后端 entities 表已有 `properties` JSON 字段，直接读写即可，不用新建表\n4. **拖动体验** — 当前拖动代码已在，保留即可，拖动结束发一次 POST 保存位置\n\n### 改动范围\n| 层 | 改动 |\n|---|---|\n| 后端 | 新增 `GET /api/graph/positions` 批量取位置 + `POST /api/graph/position` 保存单个位置 |\n| 前端 | 砍掉力模拟相关代码，初始加载用保存位置/自动排列，保留拖动交互 |\n\n整体改动量大概砍 300 行、加 100 行，净减 ~200 行。\n\n---\n\n要我展开具体实施计划吗？还是直接开始？",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "user",
+      "content": "或者直接做成简单的树状图怎么样？",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "这个方向比静态方案更彻底。分析一下：\n\n---\n\n## 知识图谱 → 树状图的适配\n\n### 数据结构契合度\n\n当前图的关联结构基本就是一棵树：\n\n```\nUser|AXIS\n  ├── AXIS·偏好习惯\n  │     ├── 先确认再动手原则\n  │     ├── 修正记忆原则\n  │     └── 读文件限制原则\n  ├── AXIS·计划目标\n  │     ├── 文件操作工具集成方案\n  │     └── ...\n  └── AXIS·事实经历\n        └── ...\nAI|Midnight\n  └── ...\nProject|AIChat\n  └── ...\n```\n\n跨中心关联（比如「先确认再动手原则」同时连 AXIS 和 Midnight）是少数，可以画成虚线跨层级连线，不影响树状主布局。\n\n### 两种树风格\n\n| | A. 缩进列表树（HTML/CSS） | B. 组织架构树（SVG） |\n|---|---|---|\n| 样子 | 像 VS Code 文件树、Finder 列表 | 像公司组织架构图，横向层级展开 |\n| 性能 | 无敌，纯 DOM | 很好，静态 SVG 无动画 |\n| 拖动 | 不自然 | 可拖，但重排麻烦 |\n| 实现量 | 小 | 中 |\n| 密集度 | 信息密度高，省空间 | 节点大，层级多了很宽 |\n\n### 我倾向推荐 A\n\n- 当前知识图谱节点密集、文字多，缩进列表天然适合浏览大量文本节点\n- 每个节点一行，颜色标签 + 类型标记分得清\n- 点击展开/查看详情，hover 高亮关联虚线\n- 实现量最小，砍掉力模拟 + SVG 渲染后代码至少减半\n\n---\n\n你倾向哪种风格？",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "user",
+      "content": "一个子节点只能有一个父节点。如果有两个那就两个都写。不要搁哪老想着去重了。",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "明白了，多父节点就复制，不搞虚线不搞去重。简单直接。\n\n---\n\n## 推荐：缩进列表树\n\n```\n▼ User|AXIS\n  ▼ AXIS·偏好习惯\n      先确认再动手原则\n      修正记忆原则\n      读文件限制原则\n  ▼ AXIS·计划目标\n      文件操作工具集成方案\n      ...\n▼ AI|Midnight\n  ▼ Midnight·行为规则\n      先确认再动手原则    ← 复制出现，不是引用\n      修正记忆原则         ← 复制出现\n      ...\n▼ Project|AIChat\n  ...\n```\n\n- 纯 HTML/CSS，砍掉整个 SVG + d3-force + 力模拟\n- 拖动保存位置也不需要了，树布局是固定的\n- 后端几乎不动，前端代码量砍大半\n\n---\n\n要我直接开始改 `GraphCanvas.vue` 吗？",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "[记忆检索结果]\n[记忆检索结果]\n## 👤 关于你\n## 关于 读文件限制原则 (重要度 10/10) [固定]\n- [rule] AXIS 要求读文件必须分页读取（offset/limit），不要全量读取，避免大文件消耗过多 token\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 修正记忆原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 AXIS·偏好习惯 (重要度 10/10) [固定]\n- 关联概念：AI主动记忆写入, AXIS, 修正记忆原则, 先确认再动手原则, 可折叠工具调用与代码块\n## 关于 AXIS·计划目标 (重要度 10/10) [固定]\n- 关联概念：AIChat设置功能, AXIS, 多Provider设置功能v2, 文件操作工具集成方案, 缓存落盘优化\n## 关于 AXIS·事实经历 (重要度 10/10) [固定]\n- 关联概念：AI系统架构, AI记忆使用机制, AXIS, ChatView.vue滚动修复, fetch_url工具\n## 关于 先确认再动手原则 (重要度 9/10) [固定]\n- [rule] AI 在工具返回结果前不要发问，应该直接继续行动\n- [preference] AXIS 要求协作准则：先确定问题再动手，不看到一个就改。步骤为：排查确认根因 → 汇报影响范围和改法 → 等确认 → 再动手。\n- [preference] AXIS明确禁止AI在未确认的情况下直接修改代码。即使AI给出方案后用户表达了看法，也必须等用户明确说'改吧'之类的确认词才能动手。任何改动前必须先问'要我改吗？'并等待确认。\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 修正记忆原则, 未经确认直接改代码违规\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 修正记忆原则 (重要度 9/10) [固定]\n- [rule] AXIS 规定：对话中发现知识图谱里的旧记忆有错误，纠正后必须主动更新图谱，不能仅在对话中修正。这是\"先确认再动手\"和\"读文件限制原则\"的配套规则。\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 先确认再动手原则, 读文件限制原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 未经确认直接改代码违规 (重要度 9/10) [固定]\n- [incident] 2025-01-14对话中，AXIS说'缓存不应该一个消息一个消息缓存吗？'，AI将此理解为确认并直接修改了cache.py和chat.py，违反先确认再动手原则。AXIS表示这次算了但下不为例。\n- 关联概念：AXIS·事实经历, Midnight·经验教训, 先确认再动手原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 Midnight (重要度 9/10) [固定]\n- [rule] AI 在工具返回结果前不要发问，应该直接继续行动\n- [rule] AXIS 要求读文件必须分页读取（offset/limit），不要全量读取，避免大文件消耗过多 token\n- [rule] 编辑文件前必须先用 search_files 和 search_content 了解代码结构，不能盲改\n- 关联概念：AIChat, AXIS, Midnight·经验教训, Midnight·能力边界, Midnight·行为规则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 🤖 关于我\n## 关于 读文件限制原则 (重要度 10/10) [固定]\n- [rule] AXIS 要求读文件必须分页读取（offset/limit），不要全量读取，避免大文件消耗过多 token\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 修正记忆原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 Midnight·行为规则 (重要度 10/10) [固定]\n- 关联概念：Midnight, 修正记忆原则, 先确认再动手原则, 图谱不使用emoji, 对话不使用emoji\n## 关于 Midnight·经验教训 (重要度 10/10) [固定]\n- 关联概念：Midnight, 未经确认直接改代码违规, 犯错教训, 编辑文件前未验证路径导致多轮空改\n## 关于 Midnight·能力边界 (重要度 10/10) [固定]\n- 关联概念：Midnight\n## 关于 AXIS (重要度 9/10) [固定]\n- [incident] 2025-01-14对话中，AXIS说'缓存不应该一个消息一个消息缓存吗？'，AI将此理解为确认并直接修改了cache.py和chat.py，违反先确认再动手原则。AXIS表示这次算了但下不为例。\n- [plan] AXIS 在探索给 AI 挂载文件操作工具的方案，让 AI 能在指定目录内修改文件，与知识图谱记忆系统互补\n- [preference] AXIS 对 AI 系统架构设计有浓厚兴趣，并非随意闲聊，在认真探索技术落地路径\n- 关联概念：AIChat, AXIS·事实经历, AXIS·偏好习惯, AXIS·计划目标, Midnight\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 先确认再动手原则 (重要度 9/10) [固定]\n- [rule] AI 在工具返回结果前不要发问，应该直接继续行动\n- [preference] AXIS 要求协作准则：先确定问题再动手，不看到一个就改。步骤为：排查确认根因 → 汇报影响范围和改法 → 等确认 → 再动手。\n- [preference] AXIS明确禁止AI在未确认的情况下直接修改代码。即使AI给出方案后用户表达了看法，也必须等用户明确说'改吧'之类的确认词才能动手。任何改动前必须先问'要我改吗？'并等待确认。\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 修正记忆原则, 未经确认直接改代码违规\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 修正记忆原则 (重要度 9/10) [固定]\n- [rule] AXIS 规定：对话中发现知识图谱里的旧记忆有错误，纠正后必须主动更新图谱，不能仅在对话中修正。这是\"先确认再动手\"和\"读文件限制原则\"的配套规则。\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 先确认再动手原则, 读文件限制原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 未经确认直接改代码违规 (重要度 9/10) [固定]\n- [incident] 2025-01-14对话中，AXIS说'缓存不应该一个消息一个消息缓存吗？'，AI将此理解为确认并直接修改了cache.py和chat.py，违反先确认再动手原则。AXIS表示这次算了但下不为例。\n- 关联概念：AXIS·事实经历, Midnight·经验教训, 先确认再动手原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 📁 项目 AIChat\n## 关于 AIChat·项目规范 (重要度 10/10) [固定]\n- 关联概念：AIChat, 知识图谱视觉克隆修改计划, 请求缓存key计算修复, 通用API配置命名\n## 关于 AIChat·项目架构 (重要度 10/10) [固定]\n- 关联概念：AIChat, AIChat前端架构, AIChat后端架构, AIChat对话存储, AIChat工具系统\n## 关于 AIChat·项目真实结构 (重要度 10/10) [固定]\n- 关联概念：AIChat, ChatView.vue, ChatView.vue归档位置修复, ChatView.vue滚动修复, GraphCanvas.vue\n## 📌 其他\n## 关于 AIChat (重要度 8/10)\n- [topic] .env key 已改为通用命名：API_KEY（原 DEEPSEEK_API_KEY）、API_BASE_URL（原 DEEPSEEK_BASE_URL）、CHAT_MODEL（原 DEEPSEEK_CHAT_MODEL），config.py 同步改名，chat.py 等引用需同步修改\n- [topic] .env 字段设计: CHAT_PROVIDER 决定当前 provider，每个 provider 有独立的 API_KEY/BASE_URL/CHAT_MODEL（如 DEEPSEEK_API_KEY, OPENAI_BASE_URL）。前端按 provider 分标签页，模型下拉框仅显示当前 provider 模型，「拉取模型列表」仅请求对应 provider 的 /v1/models\n- [fact] 2025-01-14 — README.md 完全重写，旧预热器计划已移除，当前只保留设置功能计划；字段名从 DeepSeek 专用改为通用命名以支持多 provider 切换\n- 关联概念：AIChat·项目架构, AIChat·项目真实结构, AIChat·项目规范, AXIS, Midnight\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 知识图谱视觉克隆修改计划 (重要度 9/10)\n- [fact] 2025-01-14 — README.md 知识图谱视觉克隆计划已完全重写。旧计划使用不存在的函数名（nodeIndexMap、selectNode()、drawPanel()），新计划基于实际代码：refresh()(line 641)、onNodeClick()(line 633)、selectedNode/nodeFacts/nodeEdges computed、getPulseType()。每项改动标注了精确行号、插入位置、完整代码示例。实施顺序为 2→5→3→4\n- [fact] 视觉克隆修改计划仅完成1/5：第1项（LayoutNode接口cloneOf字段）已实现，第2-5项（refresh克隆逻辑、selectNode联动、drawPanel聚合、样式继承）均未实现。README.md已于2025-01-14更新为逐项标注状态。\n- 关联概念：AIChat, AIChat·项目规范\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 编辑文件前未验证路径导致多轮空改 (重要度 8/10)\n- [fact] GraphCanvas.vue 的正确路径是 web/AIChat/src/components/graph/GraphCanvas.vue（graph 子目录），而非 components/GraphCanvas.vue。edit_file 工具对不存在路径会静默创建新文件而非报错，导致多轮改动打空。\n- 关联概念：Midnight·经验教训\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 设置功能计划v2 (重要度 8/10)\n- [fact] README.md 已重写为多 provider 设置功能计划，覆盖 .env 重设计、config.py 动态属性、settings.py 多 provider 读写 + 按 provider 拉取模型列表。chat.py/graph.py/memory.py/main.py 无需改动\n- [plan] README.md 已重写为纯设置功能计划，不再包含旧的预热器改造计划。计划覆盖后端 settings.py + config.py 改动、前端 SettingsView.vue + 路由 + HomeView 改动。.env key 使用通用命名 API_KEY / API_BASE_URL / CHAT_MODEL 替代 DEEPSEEK_* 专用命名。\n- 关联概念：AIChat·项目架构, AXIS·计划目标, 通用API配置命名\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 AIChat设置功能 (重要度 8/10)\n- [topic] .env key 已改为通用命名：API_KEY（原 DEEPSEEK_API_KEY）、API_BASE_URL（原 DEEPSEEK_BASE_URL）、CHAT_MODEL（原 DEEPSEEK_CHAT_MODEL），config.py 同步改名，chat.py 等引用需同步修改\n- [fact] 2025-01-14 — README.md 完全重写，旧预热器计划已移除，当前只保留设置功能计划；字段名从 DeepSeek 专用改为通用命名以支持多 provider 切换\n- [topic] 模型列表拉取通过后端代理调用 OpenAI 兼容的 GET /v1/models 接口，超时5秒，失败回退内置兜底列表（含 DeepSeek/OpenAI/Anthropic 常用模型ID）\n- 关联概念：AIChat·项目架构, AXIS·计划目标\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 知识图谱流式渐进渲染计划 (重要度 9/10)\n- [fact] 2025-01-14 — README.md 知识图谱流式渐进渲染计划已审查修正。核心改动：(1) 边=弹力线（胡克定律弹簧），拖动通过弹力线传导整个连通系统；(2) 排斥力使用空间哈希网格 O(n) 替代 O(n²)；(3) 新增 Phase 3 渲染孤岛节点；(4) 新增 GET /api/graph/facts 和 /api/graph/orphans 接口；(5) 力模拟+渲染合并为单一 raf 循环；(6) spawnLoop 明确等本轮子节点全部淡入完+250ms冷却再下一轮\n- [fact] 2025-01-14 — README.md已更新为流式渐进渲染方案：根节点→子节点播种→孙节点播种，持续力模拟，全节点可拖动，无展开收起\n- [preference] AXIS明确要求不需要展开收起节点——所有节点自动无限展开，一旦渲染就永久可见。移除了state字段（collapsed/expanded/loading/leaf），改为简单的loaded标记\n- 关联概念：AIChat, GraphCanvas.vue重写v2, 孤岛节点Phase3, 弹力线模型, 流式播种渲染\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 文件操作工具集成方案 (重要度 9/10)\n- [plan] AXIS 在探索给 AI 挂载文件操作工具的方案，让 AI 能在指定目录内修改文件，与知识图谱记忆系统互补\n- [plan] AXIS在探索给AI添加网页访问能力（HTTP请求工具），这是文件操作工具集成方案的延伸，旨在让AI能同时操作本地文件和远程数据\n- [pending] 待确认：AXIS 目前使用的是什么平台（开源框架如 LangChain/Dify/Coze 还是自建），这决定文件操作工具的具体落地方式\n- 关联概念：AI系统架构, AXIS·计划目标, 知识图谱记忆系统, 网页访问工具\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 知识图谱记忆系统 (重要度 9/10)\n- [topic] 当前记忆系统基于图数据库+API（save_to_graph / search_memory），无法通过文件操作直接修改底层存储\n- 关联概念：AI系统架构, AXIS·事实经历, 文件操作工具集成方案\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 AI主动记忆写入 (重要度 9/10)\n- [fact] AXIS 要求 AI 在对话中主动将重要信息写入知识图谱，而非等到对话结束归档时再处理。已修改 SYSTEM_PROMPT 规则3实现此需求。\n- 关联概念：AXIS·偏好习惯\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 设置功能计划 (重要度 2/10)\n- [plan] AXIS 要求在 README.md 编写设置功能实施计划，准备交给其他 AI 实现。计划已写入根目录 README.md 末尾的「设置功能实现计划」章节。\n- [plan] 设置功能实现方案：后端新增 backend/app/api/settings.py（GET/PUT 读写 .env），前端新增 web/AIChat/src/views/SettingsView.vue（API地址/Key/模型下拉框/预热白名单），路由 /settings，HomeView 卡片改为 available。\n- 关联概念：AIChat·项目架构, AXIS·计划目标, SettingsView.vue, settings.py\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 SettingsView.vue (重要度 2/10)\n- [plan] 设置功能实现方案：后端新增 backend/app/api/settings.py（GET/PUT 读写 .env），前端新增 web/AIChat/src/views/SettingsView.vue（API地址/Key/模型下拉框/预热白名单），路由 /settings，HomeView 卡片改为 available。\n- 关联概念：设置功能计划\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "user",
+      "content": "改",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "找到了。文件在 `G:\\games\\AIChat\\web\\AIChat\\src\\components\\graph\\GraphCanvas.vue`。",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "Now let me look at the API module to understand available functions:",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "好，已经完整了解了当前代码和 API 接口。现在开始重写为缩进列表树。",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "写好了。验证一下前端编译：",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "类型检查通过。试试 vite build：",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "构建成功，0 错误。\n\n改完了。新 `GraphCanvas.vue` 从 1349 行砍到约 300 行：\n\n- **去掉了**：力模拟、空间哈希、Canvas 粒子、SVG 渲染、pan/zoom/drag、spawnLoop 渐进加载、孤岛节点\n- **保留了**：详情面板、搜索、类型颜色图标、暗色主题\n- **变成**：纯 CSS 缩进列表树，根节点默认展开，点击 ▶ 展开子节点，点击行名查看详情\n- 多父节点 = 各自一行，不去重\n\n刷新页面试试。",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "user",
+      "content": "很好没问题了，你应该自己更新记忆！说了多少遍了",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "你说得对，马上更新。已更新。旧计划（流式渐进渲染、视觉克隆）也已标记为废弃，多父节点不去重写入偏好。抱歉又让你提醒，下次主动记。",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "user",
+      "content": "还有，以后搜索，写读文件，直接用绝对目录，因为工具在后端，用相对目录很容易扫不到！",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "已写入，pinned 固定注入。绝对路径铁律记下了：所有文件操作从 `G:\\games\\AIChat\\` 开头，不再依赖相对路径。",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "system",
+      "content": "[记忆检索结果]\n[记忆检索结果]\n## 👤 关于你\n## 关于 读文件限制原则 (重要度 10/10) [固定]\n- [rule] AXIS 要求读文件必须分页读取（offset/limit），不要全量读取，避免大文件消耗过多 token\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 修正记忆原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 AXIS·偏好习惯 (重要度 10/10) [固定]\n- [preference] AXIS 明确要求：多父节点不去重，一个子节点有多个父节点就各自写一行。\n- 关联概念：AI主动记忆写入, AXIS, 修正记忆原则, 先确认再动手原则, 可折叠工具调用与代码块\n## 关于 AXIS·计划目标 (重要度 10/10) [固定]\n- 关联概念：AIChat设置功能, AXIS, 多Provider设置功能v2, 文件操作工具集成方案, 缓存落盘优化\n## 关于 AXIS·事实经历 (重要度 10/10) [固定]\n- 关联概念：AI系统架构, AI记忆使用机制, AXIS, ChatView.vue滚动修复, fetch_url工具\n## 关于 先确认再动手原则 (重要度 9/10) [固定]\n- [rule] AI 在工具返回结果前不要发问，应该直接继续行动\n- [preference] AXIS 要求协作准则：先确定问题再动手，不看到一个就改。步骤为：排查确认根因 → 汇报影响范围和改法 → 等确认 → 再动手。\n- [preference] AXIS明确禁止AI在未确认的情况下直接修改代码。即使AI给出方案后用户表达了看法，也必须等用户明确说'改吧'之类的确认词才能动手。任何改动前必须先问'要我改吗？'并等待确认。\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 修正记忆原则, 未经确认直接改代码违规\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 修正记忆原则 (重要度 9/10) [固定]\n- [rule] AXIS 规定：对话中发现知识图谱里的旧记忆有错误，纠正后必须主动更新图谱，不能仅在对话中修正。这是\"先确认再动手\"和\"读文件限制原则\"的配套规则。\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 先确认再动手原则, 读文件限制原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 未经确认直接改代码违规 (重要度 9/10) [固定]\n- [incident] 2025-01-14对话中，AXIS说'缓存不应该一个消息一个消息缓存吗？'，AI将此理解为确认并直接修改了cache.py和chat.py，违反先确认再动手原则。AXIS表示这次算了但下不为例。\n- 关联概念：AXIS·事实经历, Midnight·经验教训, 先确认再动手原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 Midnight (重要度 9/10) [固定]\n- [rule] AI 在工具返回结果前不要发问，应该直接继续行动\n- [rule] AXIS 要求读文件必须分页读取（offset/limit），不要全量读取，避免大文件消耗过多 token\n- [rule] 编辑文件前必须先用 search_files 和 search_content 了解代码结构，不能盲改\n- 关联概念：AIChat, AXIS, Midnight·经验教训, Midnight·能力边界, Midnight·行为规则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 🤖 关于我\n## 关于 读文件限制原则 (重要度 10/10) [固定]\n- [rule] AXIS 要求读文件必须分页读取（offset/limit），不要全量读取，避免大文件消耗过多 token\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 修正记忆原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 Midnight·行为规则 (重要度 10/10) [固定]\n- 关联概念：Midnight, 修正记忆原则, 先确认再动手原则, 图谱不使用emoji, 对话不使用emoji\n## 关于 Midnight·经验教训 (重要度 10/10) [固定]\n- [rule] 2025-01-14 — AXIS 要求搜索和文件操作一律使用绝对路径（G:\\games\\AIChat\\...），因为工具在后端执行，相对路径可能因工作目录问题扫不到文件。之前多次使用相对路径导致 edit_file 写到错误位置。\n- 关联概念：Midnight, 未经确认直接改代码违规, 犯错教训, 绝对路径原则, 编辑文件前未验证路径导致多轮空改\n## 关于 Midnight·能力边界 (重要度 10/10) [固定]\n- 关联概念：Midnight, key_file_paths\n## 关于 AXIS (重要度 9/10) [固定]\n- [incident] 2025-01-14对话中，AXIS说'缓存不应该一个消息一个消息缓存吗？'，AI将此理解为确认并直接修改了cache.py和chat.py，违反先确认再动手原则。AXIS表示这次算了但下不为例。\n- [plan] AXIS 在探索给 AI 挂载文件操作工具的方案，让 AI 能在指定目录内修改文件，与知识图谱记忆系统互补\n- [preference] AXIS 对 AI 系统架构设计有浓厚兴趣，并非随意闲聊，在认真探索技术落地路径\n- 关联概念：AIChat, AXIS·事实经历, AXIS·偏好习惯, AXIS·计划目标, GraphCanvas.vue树状图重写\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 先确认再动手原则 (重要度 9/10) [固定]\n- [rule] AI 在工具返回结果前不要发问，应该直接继续行动\n- [preference] AXIS 要求协作准则：先确定问题再动手，不看到一个就改。步骤为：排查确认根因 → 汇报影响范围和改法 → 等确认 → 再动手。\n- [preference] AXIS明确禁止AI在未确认的情况下直接修改代码。即使AI给出方案后用户表达了看法，也必须等用户明确说'改吧'之类的确认词才能动手。任何改动前必须先问'要我改吗？'并等待确认。\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 修正记忆原则, 未经确认直接改代码违规\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 修正记忆原则 (重要度 9/10) [固定]\n- [rule] AXIS 规定：对话中发现知识图谱里的旧记忆有错误，纠正后必须主动更新图谱，不能仅在对话中修正。这是\"先确认再动手\"和\"读文件限制原则\"的配套规则。\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则, 先确认再动手原则, 读文件限制原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 未经确认直接改代码违规 (重要度 9/10) [固定]\n- [incident] 2025-01-14对话中，AXIS说'缓存不应该一个消息一个消息缓存吗？'，AI将此理解为确认并直接修改了cache.py和chat.py，违反先确认再动手原则。AXIS表示这次算了但下不为例。\n- 关联概念：AXIS·事实经历, Midnight·经验教训, 先确认再动手原则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 📁 项目 AIChat\n## 关于 key_file_paths (重要度 10/10) [固定]\n- [rule] 2025-01-14 — AXIS 要求搜索和文件操作一律使用绝对路径（G:\\games\\AIChat\\...），因为工具在后端执行，相对路径可能因工作目录问题扫不到文件。之前多次使用相对路径导致 edit_file 写到错误位置。\n- [fact] AXIS 要求 AI 操作文件时先确认路径，因为之前多次写到错误位置（如混淆 app/ 和 backend/、混淆 graph.html 和 GraphCanvas.vue）。铁律：前端 web/AIChat/src/，后端 backend/，没有独立 app/ 目录。\n- [fact] 项目关键文件路径：主路由 backend/app/main.py，前端入口 web/AIChat/src/，知识图谱可视化组件 web/AIChat/src/components/graph/GraphCanvas.vue，聊天视图 web/AIChat/src/components/ChatView.vue。根目录 G:\\games\\AIChat。没有独立的 app/ 目录，backend/ 是唯一后端目录。\n- 关联概念：AIChat·项目真实结构, Midnight·能力边界\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 AIChat·项目规范 (重要度 10/10) [固定]\n- 关联概念：AIChat, 知识图谱视觉克隆修改计划, 请求缓存key计算修复, 通用API配置命名\n## 关于 AIChat·项目架构 (重要度 10/10) [固定]\n- 关联概念：AIChat, AIChat前端架构, AIChat后端架构, AIChat对话存储, AIChat工具系统\n## 关于 AIChat·项目真实结构 (重要度 10/10) [固定]\n- 关联概念：AIChat, ChatView.vue, ChatView.vue归档位置修复, ChatView.vue滚动修复, GraphCanvas.vue\n## 📌 其他\n## 关于 绝对路径原则 (重要度 10/10) [固定]\n- [rule] 2025-01-14 — AXIS 要求搜索和文件操作一律使用绝对路径（G:\\games\\AIChat\\...），因为工具在后端执行，相对路径可能因工作目录问题扫不到文件。之前多次使用相对路径导致 edit_file 写到错误位置。\n- 关联概念：AXIS·偏好习惯, Midnight·经验教训, Midnight·行为规则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 知识图谱记忆系统 (重要度 9/10)\n- [topic] 当前记忆系统基于图数据库+API（save_to_graph / search_memory），无法通过文件操作直接修改底层存储\n- 关联概念：AI系统架构, AXIS·事实经历, 文件操作工具集成方案\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 知识图谱存储 (重要度 9/10)\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 知识图谱树状迁移完成 (重要度 6/10)\n- 关联概念：AIChat·项目真实结构, AXIS·事实经历\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 知识图谱可视化美化 (重要度 9/10)\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 AIChat知识图谱存储 (重要度 8/10)\n- [topic] backend/app/core/graph.py 基于 aiosqlite 的知识图谱，四个表：entities(名称+类型+属性JSON)、relations(from_type/from_name/to_type/to_name/rel_type)、facts(内容+类型+时间戳)、conversations\n- [topic] backend/app/core/memory.py 负责从知识图谱检索记忆并注入到对话上下文，每次用户消息前自动调用 search_memory\n- 关联概念：AIChat·项目架构\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 知识图谱可视化 (重要度 9/10)\n- [preference] AXIS 要求知识图谱界面持续美化，追求高级质感：深色主题、粒子背景、渐变节点、平滑动画、搜索过滤、侧面板详情\n- [fact] GraphCanvas.vue 使用 SVG 力导向布局（基于 d3-force），深色主题，粒子背景，节点悬停发光，侧面板详情。已添加搜索过滤（⌘F）、动态粒子系统、边线渐变、统计徽章。\n- 关联概念：AIChat·项目真实结构, AXIS·事实经历, GraphCanvas.vue, 美观的知识图谱界面\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 知识图谱视觉克隆修改计划 (重要度 9/10)\n- [fact] 2025-01-14 — README.md 知识图谱视觉克隆计划已完全重写。旧计划使用不存在的函数名（nodeIndexMap、selectNode()、drawPanel()），新计划基于实际代码：refresh()(line 641)、onNodeClick()(line 633)、selectedNode/nodeFacts/nodeEdges computed、getPulseType()。每项改动标注了精确行号、插入位置、完整代码示例。实施顺序为 2→5→3→4\n- [fact] 视觉克隆修改计划仅完成1/5：第1项（LayoutNode接口cloneOf字段）已实现，第2-5项（refresh克隆逻辑、selectNode联动、drawPanel聚合、样式继承）均未实现。README.md已于2025-01-14更新为逐项标注状态。\n- 关联概念：AIChat, AIChat·项目规范, GraphCanvas.vue树状图重写\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 知识图谱流式渐进渲染计划 (重要度 9/10)\n- [fact] 2025-01-14 — README.md 知识图谱流式渐进渲染计划已审查修正。核心改动：(1) 边=弹力线（胡克定律弹簧），拖动通过弹力线传导整个连通系统；(2) 排斥力使用空间哈希网格 O(n) 替代 O(n²)；(3) 新增 Phase 3 渲染孤岛节点；(4) 新增 GET /api/graph/facts 和 /api/graph/orphans 接口；(5) 力模拟+渲染合并为单一 raf 循环；(6) spawnLoop 明确等本轮子节点全部淡入完+250ms冷却再下一轮\n- [fact] 2025-01-14 — README.md已更新为流式渐进渲染方案：根节点→子节点播种→孙节点播种，持续力模拟，全节点可拖动，无展开收起\n- [preference] AXIS明确要求不需要展开收起节点——所有节点自动无限展开，一旦渲染就永久可见。移除了state字段（collapsed/expanded/loading/leaf），改为简单的loaded标记\n- 关联概念：AIChat, GraphCanvas.vue树状图重写, GraphCanvas.vue重写v2, 孤岛节点Phase3, 弹力线模型\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 美观的知识图谱界面 (重要度 9/10)\n- 关联概念：AXIS·偏好习惯, 知识图谱可视化\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 知识图谱性能掉帧 (重要度 9/10)\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 图谱不使用emoji (重要度 9/10)\n- 关联概念：AXIS·偏好习惯, Midnight·行为规则\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 AIChat (重要度 8/10)\n- [topic] .env key 已改为通用命名：API_KEY（原 DEEPSEEK_API_KEY）、API_BASE_URL（原 DEEPSEEK_BASE_URL）、CHAT_MODEL（原 DEEPSEEK_CHAT_MODEL），config.py 同步改名，chat.py 等引用需同步修改\n- [topic] .env 字段设计: CHAT_PROVIDER 决定当前 provider，每个 provider 有独立的 API_KEY/BASE_URL/CHAT_MODEL（如 DEEPSEEK_API_KEY, OPENAI_BASE_URL）。前端按 provider 分标签页，模型下拉框仅显示当前 provider 模型，「拉取模型列表」仅请求对应 provider 的 /v1/models\n- [fact] 2025-01-14 — README.md 完全重写，旧预热器计划已移除，当前只保留设置功能计划；字段名从 DeepSeek 专用改为通用命名以支持多 provider 切换\n- 关联概念：AIChat·项目架构, AIChat·项目真实结构, AIChat·项目规范, AXIS, GraphCanvas.vue树状图重写\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 AI主动记忆写入 (重要度 9/10)\n- [fact] AXIS 要求 AI 在对话中主动将重要信息写入知识图谱，而非等到对话结束归档时再处理。已修改 SYSTEM_PROMPT 规则3实现此需求。\n- 关联概念：AXIS·偏好习惯\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]\n## 关于 AI记忆使用机制 (重要度 9/10)\n- [preference] AXIS提醒AI应主动使用记忆功能，在对话过程中就保存重要信息，而不是等对话结束\n- 关联概念：AXIS·事实经历\n- 来源对话：[记忆图谱渲染超过100个节点就开始严重掉帧了]",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "user",
+      "content": "记忆里面关于旧版知识图谱都清理一下",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_00_IH9cdGPAgzTOQbQ4bdmj6389",
+          "type": "function",
+          "function": {
+            "name": "list_memory",
+            "arguments": "{\"otype\": \"entities\"}"
+          }
+        }
+      ],
+      "reasoning_content": "让我先查看当前记忆图谱中与旧版知识图谱相关的条目，找出需要清理的内容。",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_00_IH9cdGPAgzTOQbQ4bdmj6389",
+      "content": "## 实体 (72 个)\n- [Project] AIChat\n- [category] AIChat·项目架构\n- [category] AIChat·项目真实结构\n- [category] AIChat·项目规范\n- [topic] AIChat前端架构\n- [topic] AIChat后端架构\n- [topic] AIChat对话存储\n- [topic] AIChat工具系统\n- [topic] AIChat知识图谱存储\n- [topic] AIChat缓存系统\n- [plan] AIChat设置功能\n- [preference] AI主动记忆写入\n- [topic] AI系统架构\n- [topic] AI记忆使用机制\n- [User] AXIS\n- [category] AXIS·事实经历\n- [category] AXIS·偏好习惯\n- [category] AXIS·计划目标\n- [component] ChatView.vue\n- [代码修改] ChatView.vue归档位置修复\n- [代码修改] ChatView.vue滚动修复\n- [component] GraphCanvas.vue\n- [topic] GraphCanvas.vue 正确路径\n- [fact] GraphCanvas.vue树状图重写\n- [topic] GraphCanvas.vue路径\n- [component] GraphCanvas.vue重写v2\n- [AI] Midnight\n- [category] Midnight·经验教训\n- [category] Midnight·能力边界\n- [category] Midnight·行为规则\n- [technology] Node.js\n- [technology] Python\n- [fact] README审查修正v3\n- [component] SettingsView.vue\n- [technology] Vite\n- [technology] Vue.js\n- [concept] fetch_url工具\n- [fact] key_file_paths\n- [backend] main.py\n- [module] settings.py\n- [fix] spawnAborted泄漏修复\n- [codebase] src代码库\n- [rule] 修正记忆原则\n- [rule] 先确认再动手原则\n- [preference] 可折叠工具调用与代码块\n- [preference] 可视化文件diff视图\n- [preference] 图谱不使用emoji\n- [topic] 图谱可视化参数调优记录\n- [plan] 多Provider设置功能v2\n- [preference] 对话不使用emoji\n- [plan] 文件操作工具集成方案\n- [incident] 未经确认直接改代码违规\n- [incident] 犯错教训\n- [topic] 知识图谱可视化\n- [topic] 知识图谱可视化美化\n- [topic] 知识图谱存储\n- [topic] 知识图谱性能掉帧\n- [fact] 知识图谱树状迁移完成\n- [plan] 知识图谱流式渐进渲染计划\n- [plan] 知识图谱视觉克隆修改计划\n- [topic] 知识图谱记忆系统\n- [rule] 绝对路径原则\n- [topic] 缓存key计算规则\n- [pending] 缓存落盘优化\n- [incident] 编辑文件前未验证路径导致多轮空改\n- [concept] 网页访问工具\n- [preference] 美观的知识图谱界面\n- [plan] 设置功能计划\n- [plan] 设置功能计划v2\n- [topic] 请求缓存key计算修复\n- [rule] 读文件限制原则\n- [topic] 通用API配置命名",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_00_LpIBrSLrMo70hfzT135i2207",
+          "type": "function",
+          "function": {
+            "name": "list_memory",
+            "arguments": "{\"otype\": \"facts\"}"
+          }
+        }
+      ],
+      "reasoning_content": "Let me identify which entities are related to the old knowledge graph that should be deleted:\n\nOld knowledge graph related:\n- [component] GraphCanvas.vue - still exists but was rewritten, need to check if it has old relationships\n- [fact] GraphCanvas.vue树状图重写 - this is about the new tree rewrite, should keep\n- [topic] GraphCanvas.vue 正确路径 - still relevant, keep\n- [topic] GraphCanvas.vue路径 - duplicate? \n- [component] GraphCanvas.vue重写v2 - old plan, should remove\n- [fact] README审查修正v3 - might be about old graph plans\n- [topic] 知识图谱可视化 - old SVG graph view, should remove\n- [topic] 知识图谱可视化美化 - old SVG graph beautification, should remove\n- [topic] 知识图谱性能掉帧 - old performance issue, should remove\n- [fact] 知识图谱树状迁移完成 - about completion of migration, maybe keep or update\n- [plan] 知识图谱流式渐进渲染计划 - old plan, remove\n- [plan] 知识图谱视觉克隆修改计划 - old plan, remove\n- [preference] 美观的知识图谱界面 - old preference about SVG graph, remove\n- [topic] 图谱可视化参数调优记录 - old tuning records, remove\n- [topic] 知识图谱存储 - is this about the backend graph storage? If so, keep.\n\nLet me also check facts to see what's there.\n\nLet me be thorough. Which ones are about the old knowledge graph visualization:\n\nTo remove:\n1. [topic] 知识图谱可视化 - old SVG force-directed graph\n2. [topic] 知识图谱可视化美化 - old beautification\n3. [topic] 知识图谱性能掉帧 - old performance issue\n4. [plan] 知识图谱流式渐进渲染计划 - abandoned plan\n5. [plan] 知识图谱视觉克隆修改计划 - abandoned plan  \n6. [preference] 美观的知识图谱界面 - old preference about SVG graph\n7. [topic] 图谱可视化参数调优记录 - old tuning\n8. [component] GraphCanvas.vue重写v2 - old rewrite plan\n9. [fact] README审查修正v3 - if related to old plans\n10. [fact] 知识图谱树状迁移完成 - this is the transition fact, could update or remove\n\nKeep:\n- [component] GraphCanvas.vue - still exists, just rewritten\n- [fact] GraphCanvas.vue树状图重写 - about the tree rewrite\n- [topic] GraphCanvas.vue 正确路径 - still relevant\n- [topic] 知识图谱存储 - backend storage, still relevant\n- [topic] 知识图谱记忆系统 - backend memory system, still relevant\n- [topic] AIChat知识图谱存储 - backend storage, still relevant\n\nLet me also check facts.",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_00_LpIBrSLrMo70hfzT135i2207",
+      "content": "## 事实 (62 条)\n- #80 [rule] 2025-01-14 — AXIS 要求搜索和文件操作一律使用绝对路径（G:\\games\\AIChat\\...），因为工具在后端执行，相对路径可能因工作目录问题 （关联: 绝对路径原则, key_file_paths, Midnight·经验教训）\n- #79 [preference] AXIS 明确要求：多父节点不去重，一个子节点有多个父节点就各自写一行。 （关联: AXIS·偏好习惯, GraphCanvas.vue树状图重写）\n- #78 [fix] 2025-01-14 — 修复 onUnmounted 未设 spawnAborted=true 导致组件卸载后 spawnLoop 继续发请求的bug。 （关联: spawnAborted泄漏修复, GraphCanvas.vue）\n- #77 [fact] 2025-01-14 — GraphCanvas.vue 从 SVG 力模拟图重写为纯 CSS 缩进列表树，砍掉力模拟/空间哈希/Canvas粒子/SVG渲染/ （关联: GraphCanvas.vue, GraphCanvas.vue树状图重写）\n- #76 [fact] 2025-01-14第二轮审查README.md流式渐进渲染计划，发现6个问题并全部修正：(1) spatialCellSize=200<排斥触发距离300造成 （关联: README审查修正v3, AIChat）\n- #75 [fact] 2025-01-14 — README.md 知识图谱流式渐进渲染计划已审查修正。核心改动：(1) 边=弹力线（胡克定律弹簧），拖动通过弹力线传导整个连通系统； （关联: 知识图谱流式渐进渲染计划, AIChat）\n- #74 [fact] 2025-01-14 — README.md已更新为流式渐进渲染方案：根节点→子节点播种→孙节点播种，持续力模拟，全节点可拖动，无展开收起 （关联: 知识图谱流式渐进渲染计划, AIChat）\n- #73 [preference] AXIS明确要求不需要展开收起节点——所有节点自动无限展开，一旦渲染就永久可见。移除了state字段（collapsed/expanded/loading/le （关联: 知识图谱流式渐进渲染计划）\n- #72 [preference] AXIS要求子节点几个几个慢慢加载，不要一次性全部渲染。采用spawnLoop流式播种：每轮从pendingQueue取3-5个节点，每个子节点间隔80-120 （关联: 知识图谱流式渐进渲染计划）\n- #71 [fact] 2025-01-14 — README.md 知识图谱视觉克隆计划已完全重写。旧计划使用不存在的函数名（nodeIndexMap、selectNode()、dr （关联: 知识图谱视觉克隆修改计划, AIChat）\n- #70 [fact] 视觉克隆修改计划仅完成1/5：第1项（LayoutNode接口cloneOf字段）已实现，第2-5项（refresh克隆逻辑、selectNode联动、draw （关联: 知识图谱视觉克隆修改计划）\n- #69 [fact] 图谱可视化最终参数：根节点半径 r=620，弹簧自然长度 restLen=120，斥力 kRep=80000，引力系数 kAtt=0.004，子节点初始散布 4 （关联: 图谱可视化参数调优记录）\n- #68 [fact] GraphCanvas.vue 的正确路径是 web/AIChat/src/components/graph/GraphCanvas.vue（graph 子目录 （关联: GraphCanvas.vue 正确路径, 编辑文件前未验证路径导致多轮空改）\n- #67 [fact] GraphCanvas.vue 的正确路径是 web/AIChat/src/components/graph/GraphCanvas.vue，在 graph 子 （关联: GraphCanvas.vue路径, AIChat）\n- #66 [fact] README.md 已重写为多 provider 设置功能计划，覆盖 .env 重设计、config.py 动态属性、settings.py 多 provide （关联: 设置功能计划v2）\n- #65 [topic] .env 字段设计: CHAT_PROVIDER 决定当前 provider，每个 provider 有独立的 API_KEY/BASE_URL/CHAT_MO （关联: 通用API配置命名, AIChat）\n- #64 [fact] 2025-01-14 — README.md 已更新为多 Provider 设置功能计划 v2，替代旧单一通用 key 方案。.env 改为 CHAT_PROV （关联: AIChat, 多Provider设置功能v2）\n- #63 [fact] 2025-01-14 — README.md 完全重写，旧预热器计划已移除，当前只保留设置功能计划；字段名从 DeepSeek 专用改为通用命名以支持多 pro （关联: AIChat设置功能, AIChat）\n- #62 [topic] 模型列表拉取通过后端代理调用 OpenAI 兼容的 GET /v1/models 接口，超时5秒，失败回退内置兜底列表（含 DeepSeek/OpenAI/An （关联: AIChat设置功能）\n- #61 [topic] .env key 已改为通用命名：API_KEY（原 DEEPSEEK_API_KEY）、API_BASE_URL（原 DEEPSEEK_BASE_URL）、C （关联: AIChat设置功能, AIChat）\n- #60 [plan] 设置功能计划已写入 README.md，包含3个API端点：GET /api/settings（读配置并脱敏）、PUT /api/settings（写回.env （关联: AIChat设置功能）\n- #59 [preference] AXIS 要求 .env key 命名扩展为通用格式（API_KEY / API_BASE_URL / CHAT_MODEL），不绑定 DeepSeek，以支持 （关联: AXIS, 通用API配置命名）\n- #58 [plan] README.md 已重写为纯设置功能计划，不再包含旧的预热器改造计划。计划覆盖后端 settings.py + config.py 改动、前端 Setting （关联: 设置功能计划v2, AIChat, AXIS）\n- #57 [plan] 设置功能实现方案：后端新增 backend/app/api/settings.py（GET/PUT 读写 .env），前端新增 web/AIChat/src/v （关联: 设置功能计划, settings.py, SettingsView.vue）\n- #56 [fact] 项目实际路径为 backend/app/...（后端）+ web/AIChat/src/...（前端），根目录 G:\\games\\AIChat。没有独立的 ap （关联: key_file_paths, AIChat）\n- #55 [plan] AXIS 要求在 README.md 编写设置功能实施计划，准备交给其他 AI 实现。计划已写入根目录 README.md 末尾的「设置功能实现计划」章节。 （关联: AXIS, 设置功能计划）\n- #54 [topic] backend/app/core/file_guard.py 文件操作安全守卫，确保 AI 的文件读写操作不超出白名单目录范围 （关联: AIChat工具系统）\n- #53 [topic] backend/app/core/memory.py 负责从知识图谱检索记忆并注入到对话上下文，每次用户消息前自动调用 search_memory （关联: AIChat, AIChat知识图谱存储）\n- #52 [topic] SYSTEM_PROMPT 从 backend/app/prompts/chat_system.txt 加载，包含记忆使用规则、文件操作规则、协作准则等 （关联: AIChat, AIChat后端架构）\n- #51 [fact] 项目根目录 G:\\games\\AIChat，后端在 backend/，前端在 web/AIChat/src/，没有独立 app/ 目录。数据目录 backend （关联: AIChat, key_file_paths）\n- #50 [topic] 前端组件树：App.vue → HomeView(ChatView + ToolsView + GamesView)，ChatView 包含 ChatWindo （关联: AIChat前端架构）\n- #49 [topic] backend/app/tools/__init__.py 定义 TOOL_DEFINITIONS 列表（10个工具的函数签名），dispatch() 函数根据 （关联: AIChat工具系统）\n- #48 [topic] backend/app/core/preheater.py 独立缓存预热器，定时扫描 PREHEAT_FILES 环境变量配置的白名单目录，全量读取文件写入缓存 （关联: AIChat缓存系统）\n- #47 [topic] backend/app/core/storage.py 负责对话 JSON 存储，main 对话存 data/conversations/main.json，其 （关联: AIChat对话存储）\n- #46 [topic] backend/app/core/graph.py 基于 aiosqlite 的知识图谱，四个表：entities(名称+类型+属性JSON)、relation （关联: AIChat知识图谱存储）\n- #45 [topic] backend/app/core/cache.py 实现请求级缓存+工具结果缓存，LRU淘汰+TTL过期+pickle持久化。写操作工具(write_file/ （关联: AIChat缓存系统）\n- #44 [topic] backend/app/api/chat.py 是核心对话 API，使用 AsyncOpenAI 客户端调用 DeepSeek，支持流式响应，通过 tiktok （关联: AIChat, AIChat后端架构）\n- #43 [topic] 后端入口 backend/app/main.py，FastAPI lifespan 中初始化 logger → graph.init_db() → file_g （关联: AIChat, AIChat后端架构）\n- #42 [rule] AXIS 要求读文件必须分页读取（offset/limit），不要全量读取，避免大文件消耗过多 token （关联: 读文件限制原则, Midnight）\n- #41 [rule] 编辑文件前必须先用 search_files 和 search_content 了解代码结构，不能盲改 （关联: 先确认再动手原则, Midnight）\n- #40 [rule] AI 在工具返回结果前不要发问，应该直接继续行动 （关联: 先确认再动手原则, Midnight）\n- #39 [topic] 缓存 key 必须由具体请求参数计算得出，不能笼统使用 URL 作为 key，否则不同请求会命中同一缓存 （关联: 缓存key计算规则, AIChat项目）\n- #38 [incident] 2025-01-14对话中，AXIS说'缓存不应该一个消息一个消息缓存吗？'，AI将此理解为确认并直接修改了cache.py和chat.py，违反先确认再动手原 （关联: AXIS, 未经确认直接改代码违规）\n- #37 [preference] AXIS明确禁止AI在未确认的情况下直接修改代码。即使AI给出方案后用户表达了看法，也必须等用户明确说'改吧'之类的确认词才能动手。任何改动前必须先问'要我改吗 （关联: AXIS, 先确认再动手原则）\n- #36 [topic] app/api/chat.py 中缓存 key 之前用 current_messages（已注入动态记忆内容）计算，导致同一请求因记忆检索结果不同而 key 不 （关联: 请求缓存key计算修复, AIChat项目）\n- #35 [rule] AXIS 规定：对话中发现知识图谱里的旧记忆有错误，纠正后必须主动更新图谱，不能仅在对话中修正。这是\"先确认再动手\"和\"读文件限制原则\"的配套规则。 （关联: 修正记忆原则, AXIS）\n- #31 [plan] AXIS在探索给AI添加网页访问能力（HTTP请求工具），这是文件操作工具集成方案的延伸，旨在让AI能同时操作本地文件和远程数据 （关联: AXIS, 网页访问工具, 文件操作工具集成方案）\n- #30 [preference] AXIS提醒AI应主动使用记忆功能，在对话过程中就保存重要信息，而不是等对话结束 （关联: AXIS, AI记忆使用机制）\n- #29 [fact] GraphCanvas.vue 使用 SVG 力导向布局（基于 d3-force），深色主题，粒子背景，节点悬停发光，侧面板详情。已添加搜索过滤（⌘F）、动态粒 （关联: GraphCanvas.vue, 知识图谱可视化）\n- #28 [fact] AXIS 要求 AI 操作文件时先确认路径，因为之前多次写到错误位置（如混淆 app/ 和 backend/、混淆 graph.html 和 GraphCanv （关联: key_file_paths, AXIS）\n- #27 [fact] 项目关键文件路径：主路由 backend/app/main.py，前端入口 web/AIChat/src/，知识图谱可视化组件 web/AIChat/src/c （关联: AIChat项目, key_file_paths）\n- #26 [fact] 项目结构：前端 web/AIChat/src/ (Vue3+Vite)，后端 backend/app/ (FastAPI)，没有独立的根目录 app/。之前记忆 （关联: AIChat项目）\n- #24 [fact] 知识图谱可视化是 GraphCanvas.vue（SVG力导向布局），不是 graph.html。后端 /api/graph 提供数据，前端通过 fetchGr （关联: GraphCanvas.vue）\n- #19 [preference] AXIS 要求知识图谱界面持续美化，追求高级质感：深色主题、粒子背景、渐变节点、平滑动画、搜索过滤、侧面板详情 （关联: AXIS, 知识图谱可视化）\n- #18 [preference] AXIS 要求协作准则：先确定问题再动手，不看到一个就改。步骤为：排查确认根因 → 汇报影响范围和改法 → 等确认 → 再动手。 （关联: AXIS, 先确认再动手原则）\n- #17 [fact] AXIS 要求 AI 在对话中主动将重要信息写入知识图谱，而非等到对话结束归档时再处理。已修改 SYSTEM_PROMPT 规则3实现此需求。 （关联: AXIS, AI主动记忆写入, AIChat项目）\n- #16 [修改记录] AXIS 要求修复前端对话界面两个问题：刷新后滚动到顶部、归档提示显示在最上面 （关联: AXIS, ChatView.vue滚动修复, ChatView.vue归档位置修复）\n- #15 [pending] 待确认：AXIS 目前使用的是什么平台（开源框架如 LangChain/Dify/Coze 还是自建），这决定文件操作工具的具体落地方式 （关联: AXIS, 文件操作工具集成方案）\n- #14 [preference] AXIS 对 AI 系统架构设计有浓厚兴趣，并非随意闲聊，在认真探索技术落地路径 （关联: AXIS, AI系统架构）\n- #13 [topic] 当前记忆系统基于图数据库+API（save_to_graph / search_memory），无法通过文件操作直接修改底层存储 （关联: 知识图谱记忆系统）\n- #12 [plan] AXIS 在探索给 AI 挂载文件操作工具的方案，让 AI 能在指定目录内修改文件，与知识图谱记忆系统互补 （关联: AXIS, 文件操作工具集成方案）\n- #1 [identity] 用户的名字是AXIS （关联: AXIS）",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_00_DrIsgeR7cmC22F7wgLNy8001",
+          "type": "function",
+          "function": {
+            "name": "delete_from_graph",
+            "arguments": "{\"target_type\": \"entity\", \"target\": \"知识图谱可视化\"}"
+          }
+        },
+        {
+          "id": "call_01_aPET3RnsoY18NFRJaqCU2875",
+          "type": "function",
+          "function": {
+            "name": "delete_from_graph",
+            "arguments": "{\"target_type\": \"entity\", \"target\": \"知识图谱可视化美化\"}"
+          }
+        },
+        {
+          "id": "call_02_lNEogUdywG4fhWmMQXHR2612",
+          "type": "function",
+          "function": {
+            "name": "delete_from_graph",
+            "arguments": "{\"target_type\": \"entity\", \"target\": \"知识图谱性能掉帧\"}"
+          }
+        },
+        {
+          "id": "call_03_jdc2wx4ihWqJUJMGXgeJ9969",
+          "type": "function",
+          "function": {
+            "name": "delete_from_graph",
+            "arguments": "{\"target_type\": \"entity\", \"target\": \"知识图谱流式渐进渲染计划\"}"
+          }
+        },
+        {
+          "id": "call_04_UpBWOyj98XEWzJn7SxOD7186",
+          "type": "function",
+          "function": {
+            "name": "delete_from_graph",
+            "arguments": "{\"target_type\": \"entity\", \"target\": \"知识图谱视觉克隆修改计划\"}"
+          }
+        },
+        {
+          "id": "call_05_6r0d6zzPpdg3JLwoOjox4443",
+          "type": "function",
+          "function": {
+            "name": "delete_from_graph",
+            "arguments": "{\"target_type\": \"entity\", \"target\": \"美观的知识图谱界面\"}"
+          }
+        },
+        {
+          "id": "call_06_rLFxKnQVhUuNKt9k7yfh6711",
+          "type": "function",
+          "function": {
+            "name": "delete_from_graph",
+            "arguments": "{\"target_type\": \"entity\", \"target\": \"图谱可视化参数调优记录\"}"
+          }
+        },
+        {
+          "id": "call_07_cb7ZGIRomLathQ0MwqIB9499",
+          "type": "function",
+          "function": {
+            "name": "delete_from_graph",
+            "arguments": "{\"target_type\": \"entity\", \"target\": \"GraphCanvas.vue重写v2\"}"
+          }
+        },
+        {
+          "id": "call_08_RlpWjlVmMfPn22BTpMU61793",
+          "type": "function",
+          "function": {
+            "name": "delete_from_graph",
+            "arguments": "{\"target_type\": \"entity\", \"target\": \"README审查修正v3\"}"
+          }
+        },
+        {
+          "id": "call_09_dstyWZm0dGQN9ArzXwFP6681",
+          "type": "function",
+          "function": {
+            "name": "delete_from_graph",
+            "arguments": "{\"target_type\": \"entity\", \"target\": \"GraphCanvas.vue路径\"}"
+          }
+        }
+      ],
+      "reasoning_content": "Now let me identify all old knowledge graph visualization related items to delete:\n\nEntities to delete:\n1. [topic] 知识图谱可视化 - old SVG graph view\n2. [topic] 知识图谱可视化美化 - old beautification  \n3. [topic] 知识图谱性能掉帧 - old performance issue\n4. [plan] 知识图谱流式渐进渲染计划 - abandoned\n5. [plan] 知识图谱视觉克隆修改计划 - abandoned\n6. [preference] 美观的知识图谱界面 - old preference\n7. [topic] 图谱可视化参数调优记录 - old tuning\n8. [component] GraphCanvas.vue重写v2 - old rewrite plan\n9. [fact] README审查修正v3 - about old graph plan review\n10. [topic] GraphCanvas.vue路径 - duplicate of GraphCanvas.vue 正确路径\n\nFacts to delete:\n- #29 - GraphCanvas.vue 使用 SVG 力导向布局 - OLD\n- #19 - AXIS 要求知识图谱界面持续美化 - OLD, replaced by tree view\n- #24 - 知识图谱可视化是 GraphCanvas.vue - partially old\n- #69 - 图谱可视化最终参数 - OLD\n- #70 - 视觉克隆修改计划仅完成1/5 - OLD\n- #71 - README.md 知识图谱视觉克隆计划已完全重写 - OLD\n- #72 - AXIS要求子节点几个几个慢慢加载 - OLD (spawnLoop removed)\n- #73 - AXIS明确要求不需要展开收起节点 - OLD (tree view doesn't have expand/collapse in the old sense)\n- #74 - README.md已更新为流式渐进渲染方案 - OLD\n- #75 - README.md 知识图谱流式渐进渲染计划已审查修正 - OLD\n- #76 - 2025-01-14第二轮审查README.md流式渐进渲染计划 - OLD\n- #67 - GraphCanvas.vue 的正确路径 - duplicate of #68\n- #27 - 项目关键文件路径 mentions 知识图谱可视化组件 - keep but the fact references old stuff\n\nLet me also think about what to keep about GraphCanvas.vue:\n- #77 - 2025-01-14 GraphCanvas.vue 重写为纯 CSS 缩进列表树 - KEEP (new)\n- #68 - GraphCanvas.vue 的正确路径 - KEEP (still valid)\n- #78 - spawnAborted修复 - KEEP (still valid, about bug fix)\n- #79 - 多父节点不去重 - KEEP (current preference)\n\nLet me proceed with deletion. I'll delete by entity names and fact IDs.\n\nLet me first delete the entities, then the facts.\n\nEntities to delete (by name):\n1. 知识图谱可视化\n2. 知识图谱可视化美化\n3. 知识图谱性能掉帧\n4. 知识图谱流式渐进渲染计划\n5. 知识图谱视觉克隆修改计划\n6. 美观的知识图谱界面\n7. 图谱可视化参数调优记录\n8. GraphCanvas.vue重写v2\n9. README审查修正v3\n10. GraphCanvas.vue路径 (duplicate)\n\nFacts to delete (by ID):\n#19, #24, #29, #67, #69, #70, #71, #72, #73, #74, #75, #76\n\nLet me delete them all.",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_00_DrIsgeR7cmC22F7wgLNy8001",
+      "content": "已删除实体「知识图谱可视化」及其所有关联关系和事实",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_01_aPET3RnsoY18NFRJaqCU2875",
+      "content": "已删除实体「知识图谱可视化美化」及其所有关联关系和事实",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_02_lNEogUdywG4fhWmMQXHR2612",
+      "content": "已删除实体「知识图谱性能掉帧」及其所有关联关系和事实",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_03_jdc2wx4ihWqJUJMGXgeJ9969",
+      "content": "已删除实体「知识图谱流式渐进渲染计划」及其所有关联关系和事实",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_04_UpBWOyj98XEWzJn7SxOD7186",
+      "content": "已删除实体「知识图谱视觉克隆修改计划」及其所有关联关系和事实",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_05_6r0d6zzPpdg3JLwoOjox4443",
+      "content": "已删除实体「美观的知识图谱界面」及其所有关联关系和事实",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_06_rLFxKnQVhUuNKt9k7yfh6711",
+      "content": "已删除实体「图谱可视化参数调优记录」及其所有关联关系和事实",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_07_cb7ZGIRomLathQ0MwqIB9499",
+      "content": "已删除实体「GraphCanvas.vue重写v2」及其所有关联关系和事实",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_08_RlpWjlVmMfPn22BTpMU61793",
+      "content": "已删除实体「README审查修正v3」及其所有关联关系和事实",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_09_dstyWZm0dGQN9ArzXwFP6681",
+      "content": "已删除实体「GraphCanvas.vue路径」及其所有关联关系和事实",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_00_ORWzopFL3e5LA2T7ZnB91268",
+          "type": "function",
+          "function": {
+            "name": "list_memory",
+            "arguments": "{\"otype\": \"all\"}"
+          }
+        }
+      ],
+      "reasoning_content": "Entities deleted (10). Now let me also clean up remaining old facts that might not have been caught by entity deletion. Let me check what's left:\n\nFacts that should be deleted (they might already be gone from entity deletion):\n- #19 - AXIS 要求知识图谱界面持续美化 (was related to 美观的知识图谱界面)\n- #24 - 知识图谱可视化是 GraphCanvas.vue (was related to 知识图谱可视化)\n- #29 - GraphCanvas.vue 使用 SVG 力导向布局 (was related to 知识图谱可视化/GraphCanvas.vue)\n- #67 - GraphCanvas.vue 的正确路径 (duplicate of #68)\n- #69 - 图谱可视化最终参数 (was related to 图谱可视化参数调优记录)\n- #70 - 视觉克隆修改计划仅完成1/5 (was related to 知识图谱视觉克隆修改计划)\n- #71 - README.md 知识图谱视觉克隆计划 (was related to 知识图谱视觉克隆修改计划)\n- #72 - AXIS要求子节点几个几个慢慢加载 (was related to 知识图谱流式渐进渲染计划)\n- #73 - AXIS明确要求不需要展开收起节点 (was related to 知识图谱流式渐进渲染计划)\n- #74 - README.md已更新为流式渐进渲染方案 (was related to 知识图谱流式渐进渲染计划)\n- #75 - README.md 知识图谱流式渐进渲染计划已审查修正 (was related to 知识图谱流式渐进渲染计划)\n- #76 - 第二轮审查README.md流式渐进渲染计划 (was related to README审查修正v3)\n\nThese should all be deleted already via cascade from entity deletion. Let me verify by listing remaining facts.",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_00_ORWzopFL3e5LA2T7ZnB91268",
+      "content": "## 实体 (62 个)\n- [Project] AIChat\n- [category] AIChat·项目架构\n- [category] AIChat·项目真实结构\n- [category] AIChat·项目规范\n- [topic] AIChat前端架构\n- [topic] AIChat后端架构\n- [topic] AIChat对话存储\n- [topic] AIChat工具系统\n- [topic] AIChat知识图谱存储\n- [topic] AIChat缓存系统\n- [plan] AIChat设置功能\n- [preference] AI主动记忆写入\n- [topic] AI系统架构\n- [topic] AI记忆使用机制\n- [User] AXIS\n- [category] AXIS·事实经历\n- [category] AXIS·偏好习惯\n- [category] AXIS·计划目标\n- [component] ChatView.vue\n- [代码修改] ChatView.vue归档位置修复\n- [代码修改] ChatView.vue滚动修复\n- [component] GraphCanvas.vue\n- [topic] GraphCanvas.vue 正确路径\n- [fact] GraphCanvas.vue树状图重写\n- [AI] Midnight\n- [category] Midnight·经验教训\n- [category] Midnight·能力边界\n- [category] Midnight·行为规则\n- [technology] Node.js\n- [technology] Python\n- [component] SettingsView.vue\n- [technology] Vite\n- [technology] Vue.js\n- [concept] fetch_url工具\n- [fact] key_file_paths\n- [backend] main.py\n- [module] settings.py\n- [fix] spawnAborted泄漏修复\n- [codebase] src代码库\n- [rule] 修正记忆原则\n- [rule] 先确认再动手原则\n- [preference] 可折叠工具调用与代码块\n- [preference] 可视化文件diff视图\n- [preference] 图谱不使用emoji\n- [plan] 多Provider设置功能v2\n- [preference] 对话不使用emoji\n- [plan] 文件操作工具集成方案\n- [incident] 未经确认直接改代码违规\n- [incident] 犯错教训\n- [topic] 知识图谱存储\n- [fact] 知识图谱树状迁移完成\n- [topic] 知识图谱记忆系统\n- [rule] 绝对路径原则\n- [topic] 缓存key计算规则\n- [pending] 缓存落盘优化\n- [incident] 编辑文件前未验证路径导致多轮空改\n- [concept] 网页访问工具\n- [plan] 设置功能计划\n- [plan] 设置功能计划v2\n- [topic] 请求缓存key计算修复\n- [rule] 读文件限制原则\n- [topic] 通用API配置命名\n## 事实 (51 条)\n- #80 [rule] 2025-01-14 — AXIS 要求搜索和文件操作一律使用绝对路径（G:\\games\\AIChat\\...），因为工具在后端执行，相对路径可能因工作目录问题 （关联: 绝对路径原则, key_file_paths, Midnight·经验教训）\n- #79 [preference] AXIS 明确要求：多父节点不去重，一个子节点有多个父节点就各自写一行。 （关联: AXIS·偏好习惯, GraphCanvas.vue树状图重写）\n- #78 [fix] 2025-01-14 — 修复 onUnmounted 未设 spawnAborted=true 导致组件卸载后 spawnLoop 继续发请求的bug。 （关联: spawnAborted泄漏修复, GraphCanvas.vue）\n- #77 [fact] 2025-01-14 — GraphCanvas.vue 从 SVG 力模拟图重写为纯 CSS 缩进列表树，砍掉力模拟/空间哈希/Canvas粒子/SVG渲染/ （关联: GraphCanvas.vue, GraphCanvas.vue树状图重写）\n- #68 [fact] GraphCanvas.vue 的正确路径是 web/AIChat/src/components/graph/GraphCanvas.vue（graph 子目录 （关联: GraphCanvas.vue 正确路径, 编辑文件前未验证路径导致多轮空改）\n- #66 [fact] README.md 已重写为多 provider 设置功能计划，覆盖 .env 重设计、config.py 动态属性、settings.py 多 provide （关联: 设置功能计划v2）\n- #65 [topic] .env 字段设计: CHAT_PROVIDER 决定当前 provider，每个 provider 有独立的 API_KEY/BASE_URL/CHAT_MO （关联: 通用API配置命名, AIChat）\n- #64 [fact] 2025-01-14 — README.md 已更新为多 Provider 设置功能计划 v2，替代旧单一通用 key 方案。.env 改为 CHAT_PROV （关联: AIChat, 多Provider设置功能v2）\n- #63 [fact] 2025-01-14 — README.md 完全重写，旧预热器计划已移除，当前只保留设置功能计划；字段名从 DeepSeek 专用改为通用命名以支持多 pro （关联: AIChat设置功能, AIChat）\n- #62 [topic] 模型列表拉取通过后端代理调用 OpenAI 兼容的 GET /v1/models 接口，超时5秒，失败回退内置兜底列表（含 DeepSeek/OpenAI/An （关联: AIChat设置功能）\n- #61 [topic] .env key 已改为通用命名：API_KEY（原 DEEPSEEK_API_KEY）、API_BASE_URL（原 DEEPSEEK_BASE_URL）、C （关联: AIChat设置功能, AIChat）\n- #60 [plan] 设置功能计划已写入 README.md，包含3个API端点：GET /api/settings（读配置并脱敏）、PUT /api/settings（写回.env （关联: AIChat设置功能）\n- #59 [preference] AXIS 要求 .env key 命名扩展为通用格式（API_KEY / API_BASE_URL / CHAT_MODEL），不绑定 DeepSeek，以支持 （关联: AXIS, 通用API配置命名）\n- #58 [plan] README.md 已重写为纯设置功能计划，不再包含旧的预热器改造计划。计划覆盖后端 settings.py + config.py 改动、前端 Setting （关联: 设置功能计划v2, AIChat, AXIS）\n- #57 [plan] 设置功能实现方案：后端新增 backend/app/api/settings.py（GET/PUT 读写 .env），前端新增 web/AIChat/src/v （关联: 设置功能计划, settings.py, SettingsView.vue）\n- #56 [fact] 项目实际路径为 backend/app/...（后端）+ web/AIChat/src/...（前端），根目录 G:\\games\\AIChat。没有独立的 ap （关联: key_file_paths, AIChat）\n- #55 [plan] AXIS 要求在 README.md 编写设置功能实施计划，准备交给其他 AI 实现。计划已写入根目录 README.md 末尾的「设置功能实现计划」章节。 （关联: AXIS, 设置功能计划）\n- #54 [topic] backend/app/core/file_guard.py 文件操作安全守卫，确保 AI 的文件读写操作不超出白名单目录范围 （关联: AIChat工具系统）\n- #53 [topic] backend/app/core/memory.py 负责从知识图谱检索记忆并注入到对话上下文，每次用户消息前自动调用 search_memory （关联: AIChat, AIChat知识图谱存储）\n- #52 [topic] SYSTEM_PROMPT 从 backend/app/prompts/chat_system.txt 加载，包含记忆使用规则、文件操作规则、协作准则等 （关联: AIChat, AIChat后端架构）\n- #51 [fact] 项目根目录 G:\\games\\AIChat，后端在 backend/，前端在 web/AIChat/src/，没有独立 app/ 目录。数据目录 backend （关联: AIChat, key_file_paths）\n- #50 [topic] 前端组件树：App.vue → HomeView(ChatView + ToolsView + GamesView)，ChatView 包含 ChatWindo （关联: AIChat前端架构）\n- #49 [topic] backend/app/tools/__init__.py 定义 TOOL_DEFINITIONS 列表（10个工具的函数签名），dispatch() 函数根据 （关联: AIChat工具系统）\n- #48 [topic] backend/app/core/preheater.py 独立缓存预热器，定时扫描 PREHEAT_FILES 环境变量配置的白名单目录，全量读取文件写入缓存 （关联: AIChat缓存系统）\n- #47 [topic] backend/app/core/storage.py 负责对话 JSON 存储，main 对话存 data/conversations/main.json，其 （关联: AIChat对话存储）\n- #46 [topic] backend/app/core/graph.py 基于 aiosqlite 的知识图谱，四个表：entities(名称+类型+属性JSON)、relation （关联: AIChat知识图谱存储）\n- #45 [topic] backend/app/core/cache.py 实现请求级缓存+工具结果缓存，LRU淘汰+TTL过期+pickle持久化。写操作工具(write_file/ （关联: AIChat缓存系统）\n- #44 [topic] backend/app/api/chat.py 是核心对话 API，使用 AsyncOpenAI 客户端调用 DeepSeek，支持流式响应，通过 tiktok （关联: AIChat, AIChat后端架构）\n- #43 [topic] 后端入口 backend/app/main.py，FastAPI lifespan 中初始化 logger → graph.init_db() → file_g （关联: AIChat, AIChat后端架构）\n- #42 [rule] AXIS 要求读文件必须分页读取（offset/limit），不要全量读取，避免大文件消耗过多 token （关联: 读文件限制原则, Midnight）\n- #41 [rule] 编辑文件前必须先用 search_files 和 search_content 了解代码结构，不能盲改 （关联: 先确认再动手原则, Midnight）\n- #40 [rule] AI 在工具返回结果前不要发问，应该直接继续行动 （关联: 先确认再动手原则, Midnight）\n- #39 [topic] 缓存 key 必须由具体请求参数计算得出，不能笼统使用 URL 作为 key，否则不同请求会命中同一缓存 （关联: 缓存key计算规则, AIChat项目）\n- #38 [incident] 2025-01-14对话中，AXIS说'缓存不应该一个消息一个消息缓存吗？'，AI将此理解为确认并直接修改了cache.py和chat.py，违反先确认再动手原 （关联: AXIS, 未经确认直接改代码违规）\n- #37 [preference] AXIS明确禁止AI在未确认的情况下直接修改代码。即使AI给出方案后用户表达了看法，也必须等用户明确说'改吧'之类的确认词才能动手。任何改动前必须先问'要我改吗 （关联: AXIS, 先确认再动手原则）\n- #36 [topic] app/api/chat.py 中缓存 key 之前用 current_messages（已注入动态记忆内容）计算，导致同一请求因记忆检索结果不同而 key 不 （关联: 请求缓存key计算修复, AIChat项目）\n- #35 [rule] AXIS 规定：对话中发现知识图谱里的旧记忆有错误，纠正后必须主动更新图谱，不能仅在对话中修正。这是\"先确认再动手\"和\"读文件限制原则\"的配套规则。 （关联: 修正记忆原则, AXIS）\n- #31 [plan] AXIS在探索给AI添加网页访问能力（HTTP请求工具），这是文件操作工具集成方案的延伸，旨在让AI能同时操作本地文件和远程数据 （关联: AXIS, 网页访问工具, 文件操作工具集成方案）\n- #30 [preference] AXIS提醒AI应主动使用记忆功能，在对话过程中就保存重要信息，而不是等对话结束 （关联: AXIS, AI记忆使用机制）\n- #28 [fact] AXIS 要求 AI 操作文件时先确认路径，因为之前多次写到错误位置（如混淆 app/ 和 backend/、混淆 graph.html 和 GraphCanv （关联: key_file_paths, AXIS）\n- #27 [fact] 项目关键文件路径：主路由 backend/app/main.py，前端入口 web/AIChat/src/，知识图谱可视化组件 web/AIChat/src/c （关联: AIChat项目, key_file_paths）\n- #26 [fact] 项目结构：前端 web/AIChat/src/ (Vue3+Vite)，后端 backend/app/ (FastAPI)，没有独立的根目录 app/。之前记忆 （关联: AIChat项目）\n- #24 [fact] 知识图谱可视化是 GraphCanvas.vue（SVG力导向布局），不是 graph.html。后端 /api/graph 提供数据，前端通过 fetchGr （关联: GraphCanvas.vue）\n- #18 [preference] AXIS 要求协作准则：先确定问题再动手，不看到一个就改。步骤为：排查确认根因 → 汇报影响范围和改法 → 等确认 → 再动手。 （关联: AXIS, 先确认再动手原则）\n- #17 [fact] AXIS 要求 AI 在对话中主动将重要信息写入知识图谱，而非等到对话结束归档时再处理。已修改 SYSTEM_PROMPT 规则3实现此需求。 （关联: AXIS, AI主动记忆写入, AIChat项目）\n- #16 [修改记录] AXIS 要求修复前端对话界面两个问题：刷新后滚动到顶部、归档提示显示在最上面 （关联: AXIS, ChatView.vue滚动修复, ChatView.vue归档位置修复）\n- #15 [pending] 待确认：AXIS 目前使用的是什么平台（开源框架如 LangChain/Dify/Coze 还是自建），这决定文件操作工具的具体落地方式 （关联: AXIS, 文件操作工具集成方案）\n- #14 [preference] AXIS 对 AI 系统架构设计有浓厚兴趣，并非随意闲聊，在认真探索技术落地路径 （关联: AXIS, AI系统架构）\n- #13 [topic] 当前记忆系统基于图数据库+API（save_to_graph / search_memory），无法通过文件操作直接修改底层存储 （关联: 知识图谱记忆系统）\n- #12 [plan] AXIS 在探索给 AI 挂载文件操作工具的方案，让 AI 能在指定目录内修改文件，与知识图谱记忆系统互补 （关联: AXIS, 文件操作工具集成方案）\n- #1 [identity] 用户的名字是AXIS （关联: AXIS）",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "还有一条旧事实残留。",
+      "tool_calls": [
+        {
+          "id": "call_00_NOBcZVF6Lp8tQSHd2XDf3918",
+          "type": "function",
+          "function": {
+            "name": "delete_from_graph",
+            "arguments": "{\"target_type\": \"fact\", \"target\": 24}"
+          }
+        }
+      ],
+      "reasoning_content": "还剩一条旧事实：#24 - \"知识图谱可视化是 GraphCanvas.vue（SVG力导向布局），不是 graph.html\" - 关联的是 GraphCanvas.vue。这条事实里提到 SVG 力导向布局已经过时了。还有 #27 里也提到\"知识图谱可视化组件 web/AIChat/src/components/graph/GraphCanvas.vue\"但路径是对的，只是内容描述了旧的 SVG 组件。\n\n让我清理这两条还残留的旧事实：\n- #24 - 描述 SVG 力导向布局\n- #27 - 描述\"知识图谱可视化组件\"，路径还在对但描述来自旧时代\n\n还有实体 [fact] 知识图谱树状迁移完成 - 可以保留，标记迁移完成是 OK 的。\n还有 [topic] 知识图谱存储 - 保留，这是后端图数据库存储，不是前端可视化。\n\nLet me also clean up #27 because it references \"知识图谱可视化组件\" in an old context. Actually, #27's path is correct, just the description references old context. It's fine to keep since the path is still valid. But let me fix the content by deleting and recreating... actually that's too much work. Let me just delete #24 which is clearly about the SVG force layout.\n\nAnd for #27, I should update the fact to remove the old reference. Let me just delete #24 for now.\n\nAlso, entity [fact] 知识图谱树状迁移完成 - this is about the migration being done, which is fine to keep.",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_00_NOBcZVF6Lp8tQSHd2XDf3918",
+      "content": "(无法删除记忆: 'int' object has no attribute 'strip')",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_00_LGoLoPPjIjKi2VRvtc6y8122",
+          "type": "function",
+          "function": {
+            "name": "delete_from_graph",
+            "arguments": "{\"target\": \"知识图谱可视化是 GraphCanvas.vue（SVG力导向布局），不是 graph.html\", \"target_type\": \"fact_by_content\"}"
+          }
+        }
+      ],
+      "reasoning_content": "The fact deletion by ID failed. Let me try using fact_by_content instead.",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_00_LGoLoPPjIjKi2VRvtc6y8122",
+      "content": "已删除 1 条匹配的事实",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00"
+    },
+    {
+      "role": "assistant",
+      "content": "清理完毕。汇总：\n\n**删除了 10 个实体 + 11 条事实（含级联）：**\n\n| 类型 | 删除内容 |\n|---|---|\n| 旧计划 | 知识图谱流式渐进渲染计划、视觉克隆修改计划、GraphCanvas.vue重写v2 |\n| 旧话题 | 知识图谱可视化、可视化美化、性能掉帧、参数调优记录 |\n| 旧偏好 | 美观的知识图谱界面 |\n| 旧审查 | README审查修正v3 |\n| 重复路径 | GraphCanvas.vue路径（与「正确路径」重复） |\n| 过时事实 | SVG力导向布局描述等 |\n\n**保留了与新版相关的：** `GraphCanvas.vue树状图重写`、`spawnAborted泄漏修复`、`多父节点不去重`、`GraphCanvas.vue 正确路径`。",
+      "reasoning_content": "Good, #24 is deleted. Now let me do a final check - list remaining entities and facts to ensure everything is clean.\n\nAlso I should look at fact #27 more carefully. It says \"项目关键文件路径：主路由 backend/app/main.py，前端入口 web/AIChat/src/，知识图谱可视化组件 web/AIChat/src/components/graph/GraphCanvas.vue\" - this is actually fine, the path is correct and it just mentions the component. The fact is more about file paths than about the old visualization. Keep it.\n\nNow let me also check if there are any remaining old-style facts I missed. Looking at remaining facts... all look good. The old graph visualization facts are gone.\n\nLet me save a summary to the graph of what was cleaned up.",
+      "timestamp": "2026-05-12T10:29:32.903646+00:00",
+      "prompt_tokens": 30915,
+      "completion_tokens": 16699
+    }
+  ]
+}

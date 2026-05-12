@@ -40,7 +40,7 @@ const cards: FeatureCard[] = [
     description: '系统配置与个性化设置，管理你的偏好与数据。',
     icon: '◇',
     route: '/settings',
-    available: false,
+    available: true,
     accent: '#6b7280',
   },
 ]

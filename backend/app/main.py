@@ -9,8 +9,10 @@ from app.core import logger
 from app.core.config import settings
 from app.core import file_guard
 from app.core.cache import cache
+from app.core.preheater import preheater
 from app.api.chat import router as chat_router
 from app.api.graph import router as graph_router
+from app.api.settings import router as settings_router
 
 
 @asynccontextmanager
@@ -22,8 +24,11 @@ async def lifespan(app: FastAPI):
     file_guard.init(settings.whitelist_paths)
     cache.load_from_disk()
 
+    await preheater.start()
+
     yield
 
+    await preheater.stop()
     cache.save_to_disk()
     await graph.close()
     logger.close()
@@ -41,6 +46,7 @@ app.add_middleware(
 
 app.include_router(chat_router)
 app.include_router(graph_router)
+app.include_router(settings_router)
 
 static_dir = Path(__file__).resolve().parent / "static"
 static_dir.mkdir(parents=True, exist_ok=True)

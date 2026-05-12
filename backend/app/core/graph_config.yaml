@@ -17,6 +17,16 @@ centers:
       pulse: "double"
       color: "#60a5fa"
       truncate_name: false
+    categories:
+      - name: 偏好习惯
+        icon: "\U0001F49D"
+        description: "用户的偏好、习惯、风格"
+      - name: 计划目标
+        icon: "\U0001F3AF"
+        description: "用户的计划、目标、待办"
+      - name: 事实经历
+        icon: "\U0001F4CB"
+        description: "用户的事实、经历、事件"
 
   - type: AI
     name: Midnight
@@ -29,6 +39,16 @@ centers:
       pulse: "double"
       color: "#a78bfa"
       truncate_name: false
+    categories:
+      - name: 行为规则
+        icon: "\U0001F4CF"
+        description: "AI的行为规范和约束"
+      - name: 经验教训
+        icon: "\u26A0\uFE0F"
+        description: "AI从错误中学到的教训"
+      - name: 能力边界
+        icon: "\U0001F527"
+        description: "AI的工具和能力范围"
 
   - type: Project
     name: AIChat
@@ -41,6 +61,16 @@ centers:
       pulse: "single"
       color: "#34d399"
       truncate_name: false
+    categories:
+      - name: 项目规范
+        icon: "\U0001F4D0"
+        description: "项目协作规范和约定"
+      - name: 项目架构
+        icon: "\U0001F3D7\uFE0F"
+        description: "系统架构和技术决策"
+      - name: 项目真实结构
+        icon: "\U0001F4C2"
+        description: "关键文件路径和实际结构"
 
 # ----- 实体类型统一配置 -----
 # 每个 type 的 icon / label_prefix / render 全部在这里定义，单一来源。
@@ -95,6 +125,15 @@ entity_types:
       radius: 20
       pulse: "none"
       color: "#8b5cf6"
+      truncate_name: false
+
+  # ---- 分类节点类型 ----
+  category:
+    icon: "\U0001F4C1"
+    render:
+      radius: 16
+      pulse: "none"
+      color: "#94a3b8"
       truncate_name: false
 
   # ---- 概念实体类型（非根，仅图标）----

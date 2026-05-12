@@ -123,7 +123,8 @@ async def mark_archived(conv_id: str):
 
 def _get_update_prompt() -> str:
     return config_loader.render_prompt("graph_update",
-        center_list=config_loader.build_center_list_md())
+        center_list=config_loader.build_center_list_md(),
+        category_list=config_loader.build_category_list_md())
 
 
 def _format_history(messages: list[dict]) -> str:
@@ -142,6 +143,7 @@ def _format_history(messages: list[dict]) -> str:
 
 
 async def archive_conversation(conv_id: str):
+    import httpx
     import json as _json
     from openai import AsyncOpenAI
     from app.tools import TOOL_DEFINITIONS, dispatch
@@ -160,6 +162,7 @@ async def archive_conversation(conv_id: str):
     client = AsyncOpenAI(
         api_key=settings.chat_api_key,
         base_url=settings.chat_base_url,
+        http_client=httpx.AsyncClient(trust_env=False),
     )
 
     response = await client.chat.completions.create(

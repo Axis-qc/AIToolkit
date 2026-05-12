@@ -82,10 +82,29 @@ class Cache:
     def invalidate_all_requests(self) -> int:
         return self._remove_by_prefix("req:")
 
+    def delete(self, key: str) -> bool:
+        """删除指定 key 的缓存条目。返回是否成功。"""
+        with self._lock:
+            if key in self._store:
+                self._remove(key)
+                return True
+            return False
+
+    def invalidate_file_cache(self, path: str) -> int:
+        """精准失效单个文件的 read_file 缓存。"""
+        count = 0
+        key = f"tool:read_file:{hash_args({'path': path})}"
+        if self.delete(key):
+            count += 1
+        mtime_key = f"preheat:mtime:{hash_args({'path': path})}"
+        if self.delete(mtime_key):
+            count += 1
+        return count
+
     def invalidate_write(self, tool_name: str) -> None:
-        """写操作触发关联失效（全量策略）。"""
+        """写操作触发关联失效。"""
         if tool_name in ("write_file", "edit_file"):
-            self.invalidate_tool("read_file")
+            # read_file 改为精准失效（在 chat.py 调用方处理）
             self.invalidate_tool("search_files")
             self.invalidate_tool("search_content")
         elif tool_name in ("save_to_graph", "delete_from_graph"):

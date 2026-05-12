@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from typing import Annotated
 
+import httpx
 from fastapi import APIRouter, Body, HTTPException
 from openai import AsyncOpenAI
 
@@ -24,10 +25,12 @@ router = APIRouter(tags=["graph"])
 client = AsyncOpenAI(
     api_key=settings.chat_api_key,
     base_url=settings.chat_base_url,
+    http_client=httpx.AsyncClient(trust_env=False),
 )
 
 UPDATE_SYSTEM_PROMPT = config_loader.render_prompt("graph_update",
-    center_list=config_loader.build_center_list_md())
+    center_list=config_loader.build_center_list_md(),
+    category_list=config_loader.build_category_list_md())
 
 
 @router.post("/api/chat/update-graph")
@@ -141,3 +144,23 @@ async def get_graph_config():
         "root_node_ids": config_loader.get_root_node_ids(),
         "injection": config_loader.get_injection_config(),
     }
+
+
+@router.get("/api/graph/roots")
+async def get_roots():
+    return await graph_core.get_roots()
+
+
+@router.get("/api/graph/children")
+async def get_children(type: str, name: str):
+    return await graph_core.get_children(type, name)
+
+
+@router.get("/api/graph/facts")
+async def get_facts(type: str, name: str):
+    return await graph_core.get_facts(type, name)
+
+
+@router.get("/api/graph/orphans")
+async def get_orphans():
+    return await graph_core.get_orphans()

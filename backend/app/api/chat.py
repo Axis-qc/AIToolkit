@@ -1,9 +1,11 @@
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 import tiktoken
 from fastapi import APIRouter, Body
 from fastapi.responses import StreamingResponse
@@ -22,11 +24,16 @@ router = APIRouter(tags=["chat"])
 client = AsyncOpenAI(
     api_key=settings.chat_api_key,
     base_url=settings.chat_base_url,
+    http_client=httpx.AsyncClient(trust_env=False),
 )
+
+from ..core import config_loader
 
 enc = tiktoken.get_encoding("cl100k_base")
 
-SYSTEM_PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "chat_system.txt").read_text(encoding="utf-8")
+SYSTEM_PROMPT = config_loader.render_prompt("chat_system",
+    center_list=config_loader.build_center_list_md(),
+    category_list=config_loader.build_category_list_md())
 
 MAIN_CONV_ID = "main"
 CONTEXT_LIMIT = 200000
@@ -37,6 +44,41 @@ def _estimate_tokens(text: str) -> int:
         return len(enc.encode(text))
     except Exception:
         return len(text) // 2
+
+
+_HEADER_RE = re.compile(r'^.+\s\(\d+-\d+/\d+\)$')
+
+
+def _slice_and_format(path: str, full_content: str, offset: int, limit: int) -> str:
+    lines = full_content.splitlines()
+    total = len(lines)
+    if offset < 1:
+        offset = 1
+    if offset > total:
+        return f"{path} (0-0/{total})"
+    start = offset - 1
+    end = min(start + limit, total)
+    chunk = lines[start:end]
+    result_lines = [f"{i}: {line}" for i, line in enumerate(chunk, start + 1)]
+    header = f"{path} ({start + 1}-{end}/{total})"
+    return header + "\n" + "\n".join(result_lines)
+
+
+def _unformat(formatted: str) -> str | None:
+    lines = formatted.splitlines()
+    if lines and _HEADER_RE.match(lines[0]):
+        lines = lines[1:]
+    else:
+        return None
+
+    result = []
+    for line in lines:
+        if ": " in line:
+            colon_idx = line.index(": ")
+            result.append(line[colon_idx + 2:])
+        else:
+            result.append(line)
+    return "\n".join(result)
 
 
 @router.post("/api/chat")
@@ -244,18 +286,42 @@ async def chat(req: Annotated[ChatRequest, Body()]) -> StreamingResponse:
                                 args = {}
 
                             # ── 工具结果缓存 ──
-                            tool_cache_key = f"tool:{tc['name']}:{hash_args(args)}"
-                            cached_result = cache.get(tool_cache_key)
-                            if cached_result is not None:
-                                result = cached_result
-                                log.get().info(f"[缓存] 工具结果命中 {tc['name']}")
+                            if tc['name'] == 'read_file':
+                                path = args.get('path', '')
+                                offset = args.get('offset', 1)
+                                limit = args.get('limit', 200)
+                                full_cache_key = f"tool:read_file:{hash_args({'path': path})}"
+
+                                cached_full = cache.get(full_cache_key)
+                                if cached_full is not None:
+                                    result = _slice_and_format(path, cached_full, offset, limit)
+                                    log.get().info(f"[缓存] read_file 命中 {path}")
+                                else:
+                                    raw_result = await dispatch('read_file',
+                                        {'path': path, 'offset': 1, 'limit': 999999}, conv_id=conv_id)
+                                    raw = _unformat(raw_result)
+                                    if raw is not None:
+                                        cache.set(full_cache_key, raw)
+                                        result = _slice_and_format(path, raw, offset, limit)
+                                    else:
+                                        result = raw_result
                             else:
-                                result = await dispatch(tc["name"], args, conv_id=conv_id)
-                                if tc['name'] not in WRITE_TOOLS:
-                                    cache.set(tool_cache_key, result, TTL_TOOL_RESULT)
+                                tool_cache_key = f"tool:{tc['name']}:{hash_args(args)}"
+                                cached_result = cache.get(tool_cache_key)
+                                if cached_result is not None:
+                                    result = cached_result
+                                    log.get().info(f"[缓存] 工具结果命中 {tc['name']}")
+                                else:
+                                    result = await dispatch(tc["name"], args, conv_id=conv_id)
+                                    if tc['name'] not in WRITE_TOOLS:
+                                        cache.set(tool_cache_key, result, TTL_TOOL_RESULT)
 
                             # ── 写操作触发失效 ──
                             if tc['name'] in WRITE_TOOLS:
+                                if tc['name'] in ('write_file', 'edit_file'):
+                                    path = args.get('path', '')
+                                    if path:
+                                        cache.invalidate_file_cache(path)
                                 cache.invalidate_write(tc['name'])
                                 had_write = True
 
