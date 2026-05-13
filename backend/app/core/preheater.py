@@ -41,17 +41,17 @@ class CachePreheater:
         await asyncio.to_thread(self._preheat, file_list)
 
     def _resolve_config(self) -> list[str]:
-        from app.core.config import settings
-        raw = settings.PREHEAT_FILES.strip()
-        if not raw:
-            return []
+        # 遍历 PREHEAT_0, PREHEAT_1, ... 环境变量；若都不存在则回退到 PREHEAT_FILES
+        keys = sorted(k for k in os.environ if k.startswith("PREHEAT_") and k[len("PREHEAT_"):].isdigit())
+        if keys:
+            entries = [os.environ[k].strip() for k in keys if os.environ[k].strip()]
+        else:
+            from app.core.config import settings
+            raw = settings.PREHEAT_FILES.strip()
+            entries = [e.strip() for e in raw.split(" ") if e.strip()] if raw else []
 
         result = []
-        for entry in raw.split(" "):
-            entry = entry.strip()
-            if not entry:
-                continue
-
+        for entry in entries:
             if ":" in entry:
                 path_str, ext_str = entry.split(":", 1)
                 exts = [e.strip() for e in ext_str.split(",") if e.strip()]

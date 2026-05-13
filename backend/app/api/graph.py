@@ -10,6 +10,7 @@ from app.core import config_loader
 from app.core import memory
 from app.core import storage
 from app.core import graph as graph_core
+from app.core import logger
 from app.core.config import settings
 from app.models.chat import (
     UpdateGraphRequest,
@@ -17,6 +18,13 @@ from app.models.chat import (
     ConversationItem,
     ConversationListResponse,
     ConversationDetail,
+)
+from app.models.graph_tool import (
+    DeleteFromGraphToolRequest,
+    GraphToolResponse,
+    ListMemoryToolRequest,
+    SaveToGraphToolRequest,
+    SearchMemoryToolRequest,
 )
 from app.tools import TOOL_DEFINITIONS, dispatch
 
@@ -164,3 +172,50 @@ async def get_facts(type: str, name: str):
 @router.get("/api/graph/orphans")
 async def get_orphans():
     return await graph_core.get_orphans()
+
+
+@router.post("/api/graph/search")
+async def search_graph(query: str = Body(...), top_k: int = Body(5)) -> dict:
+    log = logger.get()
+    log.info("图谱记忆检索请求: query_len=%s top_k=%s", len(query or ""), top_k)
+    summary = await memory.search(query, top_k)
+    no_result = config_loader.get_injection_config()["no_result"]
+    log.info(
+        "图谱记忆检索完成: has_result=%s summary_len=%s",
+        bool(summary and summary != no_result),
+        len(summary or ""),
+    )
+    return {"summary": summary, "has_result": bool(summary and summary != no_result)}
+
+
+def _tool_args(req) -> dict:
+    return req.model_dump(exclude_none=True)
+
+
+async def _run_graph_tool(name: str, args: dict) -> GraphToolResponse:
+    log = logger.get()
+    args_preview = json.dumps(args, ensure_ascii=False)[:300]
+    log.info("[opencode-tool] 调用 %s | args=%s", name, args_preview)
+    result = await dispatch(name, args)
+    log.info("[opencode-tool] 结果 %s | result_len=%s", name, len(result or ""))
+    return GraphToolResponse(ok=True, tool=name, result=result)
+
+
+@router.post("/api/graph/tool/search_memory")
+async def tool_search_memory(req: Annotated[SearchMemoryToolRequest, Body()]) -> GraphToolResponse:
+    return await _run_graph_tool("search_memory", _tool_args(req))
+
+
+@router.post("/api/graph/tool/save_to_graph")
+async def tool_save_to_graph(req: Annotated[SaveToGraphToolRequest, Body()]) -> GraphToolResponse:
+    return await _run_graph_tool("save_to_graph", _tool_args(req))
+
+
+@router.post("/api/graph/tool/list_memory")
+async def tool_list_memory(req: Annotated[ListMemoryToolRequest, Body()]) -> GraphToolResponse:
+    return await _run_graph_tool("list_memory", _tool_args(req))
+
+
+@router.post("/api/graph/tool/delete_from_graph")
+async def tool_delete_from_graph(req: Annotated[DeleteFromGraphToolRequest, Body()]) -> GraphToolResponse:
+    return await _run_graph_tool("delete_from_graph", _tool_args(req))

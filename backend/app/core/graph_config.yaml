@@ -165,13 +165,11 @@ default_render:
 
 # ----- 记忆注入格式 -----
 injection:
-  header: "[记忆检索结果]"
+  header: ""
   section_template: "## {icon} {label}"
   unknown_section_icon: "\U0001F4CC"
   unknown_section_label: "其他"
-  item_template: "## 关于 {entity} (重要度 {importance}/10){pinned_mark}"
-  relation_label: "关联概念"
-  source_label: "来源对话"
+  item_template: "- {entity}{pinned_mark}"
   no_result: "\uff08未找到相关记忆\uff09"
 
 # ----- 根实体间互相关系（启动时自动创建）-----

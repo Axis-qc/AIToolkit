@@ -5,54 +5,43 @@ from . import config_loader
 
 
 async def search(query: str, top_k: int = 5) -> str:
-    # 固定记忆 + 关键词匹配
     pinned = await graph.get_pinned_entities()
     keyword_results = await graph.search_entities(query, top_k)
 
-    # 去重：已存在同名实体跳过
-    seen = set()
-    merged = []
-    for r in pinned:
-        if r["entity"] not in seen:
-            seen.add(r["entity"])
-            merged.append(r)
-    for r in keyword_results:
-        if r["entity"] not in seen:
-            seen.add(r["entity"])
-            merged.append(r)
-
-    if not merged:
-        return config_loader.get_injection_config()["no_result"]
-
     inj = config_loader.get_injection_config()
-    groups: dict[str, list] = {}
-    unknown = []
+    lines = [inj["header"]] if inj.get("header") else []
 
-    for row in merged:
-        crs = row.get("center_relations", [])
-        if not crs:
-            unknown.append(row)
-        else:
-            for cr in crs:
-                key = f"{cr['center_type']}|{cr['center_name']}"
+    pinned_names = {r["entity"] for r in pinned}
+    if pinned:
+        for row in pinned:
+            _append_entity(lines, row, inj)
+
+    keyword_unique = [r for r in keyword_results if r["entity"] not in pinned_names]
+    if keyword_unique:
+        groups: dict[str, list] = {}
+        unknown = []
+        for row in keyword_unique:
+            crs = row.get("center_relations", [])
+            if not crs:
+                unknown.append(row)
+            else:
+                key = f"{crs[0]['center_type']}|{crs[0]['center_name']}"
                 groups.setdefault(key, []).append(row)
 
-    lines = [inj["header"]]
+        for c in config_loader.get_centers():
+            key = f"{c['type']}|{c['name']}"
+            if key in groups:
+                lines.append(inj["section_template"].format(icon=c["icon"], label=c["label"]))
+                for row in groups[key]:
+                    _append_entity(lines, row, inj)
 
-    for c in config_loader.get_centers():
-        key = f"{c['type']}|{c['name']}"
-        if key in groups:
-            lines.append(inj["section_template"].format(icon=c["icon"], label=c["label"]))
-            for row in groups[key]:
+        if unknown:
+            lines.append(inj["section_template"].format(
+                icon=inj["unknown_section_icon"],
+                label=inj["unknown_section_label"],
+            ))
+            for row in unknown:
                 _append_entity(lines, row, inj)
-
-    if unknown:
-        lines.append(inj["section_template"].format(
-            icon=inj["unknown_section_icon"],
-            label=inj["unknown_section_label"],
-        ))
-        for row in unknown:
-            _append_entity(lines, row, inj)
 
     return "\n".join(lines) if len(lines) > 1 else inj["no_result"]
 
@@ -65,14 +54,8 @@ def _append_entity(lines: list, row: dict, inj: dict):
     lines.append(inj["item_template"].format(entity=entity, importance=imp, pinned_mark=pinned_mark))
     for fact in row.get("facts", []) or []:
         if fact:
-            lines.append(f"- [{fact.get('type', '')}] {fact.get('content', '')}")
-    related = [r for r in (row.get("related") or []) if r]
-    if related:
-        lines.append(f"- {inj['relation_label']}：{', '.join(related)}")
-    conversations = [c for c in (row.get("conversations") or []) if c and c.get("id")]
-    if conversations:
-        srcs = ", ".join(f"[{c.get('title', c['id'][:8])}]" for c in conversations)
-        lines.append(f"- {inj['source_label']}：{srcs}")
+            lines.append(f"- {fact.get('content', '')}")
+
 
 
 async def save(nodes: list[dict], relations: list[dict], facts: list[dict] | None = None, conv_id: str | None = None, importance: int | None = None, pinned: bool | None = None):

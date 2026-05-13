@@ -12,6 +12,59 @@ DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "graph.db"
 _db = None
 _db_lock = asyncio.Lock()
 
+_IDENT_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{1,}")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]+")
+_CJK_STOPWORDS = {
+    "一个", "一些", "一下", "不是", "不用", "不能", "什么", "他们", "以及", "但是",
+    "你的", "里面", "关于", "其实", "刚才", "原来", "可以", "因为", "如果", "应该",
+    "当前", "怎么", "我们", "所以", "换成", "是否", "现在", "然后", "看看", "这个",
+    "这些", "这样", "那个", "那些", "需要", "还是", "这里",
+}
+_CJK_STOP_CHARS = set("的一是在了和就都而及与或也很到把被给用")
+_MIN_SEARCH_SCORE = 4
+
+
+def _extract_search_keywords(query: str) -> dict[str, int]:
+    """Extract conservative keywords for graph search.
+
+    Weight 5: code-like identifiers, file names, event IDs.
+    Weight 2: Chinese terms with at least 3 chars.
+    Weight 1: short Chinese terms, only used as weak signals.
+    """
+    keywords: dict[str, int] = {}
+
+    def add(raw: str, weight: int):
+        kw = raw.strip().lower()
+        if len(kw) < 2 or kw in _CJK_STOPWORDS:
+            return
+        keywords[kw] = max(keywords.get(kw, 0), weight)
+
+    for ident in _IDENT_RE.findall(query):
+        add(ident, 5)
+
+    for chunk in _CJK_RE.findall(query):
+        if chunk in _CJK_STOPWORDS:
+            continue
+        if 3 <= len(chunk) <= 8:
+            add(chunk, 2)
+        if len(chunk) >= 3:
+            for n in (3, 4, 5, 6):
+                if len(chunk) < n:
+                    continue
+                for i in range(len(chunk) - n + 1):
+                    gram = chunk[i:i + n]
+                    if gram in _CJK_STOPWORDS or any(ch in _CJK_STOP_CHARS for ch in gram):
+                        continue
+                    add(gram, 2)
+        if len(chunk) >= 2:
+            for i in range(len(chunk) - 1):
+                gram = chunk[i:i + 2]
+                if gram in _CJK_STOPWORDS or any(ch in _CJK_STOP_CHARS for ch in gram):
+                    continue
+                add(gram, 1)
+
+    return keywords
+
 
 def _ensure_dir():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -146,17 +199,9 @@ async def close():
 
 async def search_entities(query: str, top_k: int) -> list[dict]:
     db = await _connect()
-    keywords = query.lower().split()
-
-    # 对中文关键词生成 2-gram / 3-gram 辅助匹配
-    extra = []
-    for kw in list(keywords):
-        cjk = ''.join(re.findall(r'[\u4e00-\u9fff]', kw))
-        if len(cjk) >= 2:
-            for n in (2, 3):
-                for i in range(len(cjk) - n + 1):
-                    extra.append(cjk[i:i + n])
-    keywords.extend(extra)
+    keywords = _extract_search_keywords(query)
+    if not keywords:
+        return []
 
     cursor = await db.execute("SELECT name, type, properties, importance, pinned FROM entities")
     rows = await cursor.fetchall()
@@ -173,20 +218,25 @@ async def search_entities(query: str, top_k: int) -> list[dict]:
         props_text = json.dumps(proteins, ensure_ascii=False).lower()
 
         score = 0
-        for kw in keywords:
-            if kw in name_lower or name_lower in kw:
-                score += 10
-            if kw in type_lower or kw in props_text:
-                score += 1
+        for kw, weight in keywords.items():
+            if kw == name_lower:
+                score += 12
+            elif kw in name_lower or (weight >= 2 and name_lower in kw):
+                score += 10 if weight >= 5 else 6 if weight >= 2 else 3
+            if kw == type_lower:
+                score += 4
+            elif kw in type_lower or kw in props_text:
+                score += 2 if weight >= 2 else 1
 
         for about_entities, content, _ftype in all_facts:
             if row["name"] not in about_entities:
                 continue
             content_lower = content.lower()
-            if any(kw in content_lower or content_lower in kw for kw in keywords):
-                score += 2
+            for kw, weight in keywords.items():
+                if kw in content_lower:
+                    score += 4 if weight >= 5 else 2 if weight >= 2 else 1
 
-        if score > 0:
+        if score >= _MIN_SEARCH_SCORE:
             scored.append((row["name"], row["type"], row["properties"], row["importance"], row["pinned"], score))
 
     scored.sort(key=lambda x: x[5], reverse=True)
