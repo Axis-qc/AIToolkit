@@ -26,3 +26,12 @@ logs/
 # ── 临时文件 ──
 backend/_temp_*
 backend/scripts/
+
+# ── 根目录杂项 ──
+memory.jsonl
+opencode.json
+skills-lock.json
+particle_wallpaper.html
+package.json
+package-lock.json
+_check_mount.py
