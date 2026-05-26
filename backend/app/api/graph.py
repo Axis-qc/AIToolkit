@@ -1,24 +1,11 @@
-import json
-from datetime import datetime
 from typing import Annotated
 
-import httpx
-from fastapi import APIRouter, Body, HTTPException
-from openai import AsyncOpenAI
+from fastapi import APIRouter, Body
 
 from app.core import config_loader
 from app.core import memory
-from app.core import storage
 from app.core import graph as graph_core
 from app.core import logger
-from app.core.config import settings
-from app.models.chat import (
-    UpdateGraphRequest,
-    UpdateGraphResponse,
-    ConversationItem,
-    ConversationListResponse,
-    ConversationDetail,
-)
 from app.models.graph_tool import (
     DeleteFromGraphToolRequest,
     GraphToolResponse,
@@ -26,117 +13,11 @@ from app.models.graph_tool import (
     SaveToGraphToolRequest,
     SearchMemoryToolRequest,
 )
-from app.tools import TOOL_DEFINITIONS, dispatch
 
 router = APIRouter(tags=["graph"])
 
-client = AsyncOpenAI(
-    api_key=settings.chat_api_key,
-    base_url=settings.chat_base_url,
-    http_client=httpx.AsyncClient(trust_env=False),
-)
 
-UPDATE_SYSTEM_PROMPT = config_loader.render_prompt("graph_update",
-    center_list=config_loader.build_center_list_md(),
-    category_list=config_loader.build_category_list_md())
-
-
-@router.post("/api/chat/update-graph")
-async def update_graph(req: Annotated[UpdateGraphRequest, Body()]) -> UpdateGraphResponse:
-    data = storage.load(req.conversation_id)
-    if not data:
-        raise HTTPException(status_code=404, detail="对话记录不存在")
-
-    conversation_text = format_history(data["messages"])
-    messages = [
-        {"role": "system", "content": UPDATE_SYSTEM_PROMPT},
-        {"role": "user", "content": conversation_text},
-    ]
-
-    response = await client.chat.completions.create(
-        model=settings.chat_model,
-        messages=messages,
-        tools=TOOL_DEFINITIONS,
-        tool_choice="auto",
-    )
-
-    summary = ""
-    steps = []
-    msg = response.choices[0].message
-
-    if msg.content:
-        summary = msg.content
-
-    if msg.tool_calls:
-        for tc in msg.tool_calls:
-            args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-            result = await dispatch(tc.function.name, args, conv_id=req.conversation_id)
-            steps.append({"name": tc.function.name, "args": args, "result": result})
-
-    if not summary:
-        summary = "已更新图谱"
-
-    if req.conversation_id == "main":
-        msgs = data.get("messages", [])
-        if msgs:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            archived_id = f"main_archive_{ts}"
-            archived_title = (data.get("title") or "对话") + " (归档)"
-            storage.save(archived_id, archived_title, msgs,
-                         archived=True, last_prompt_tokens=data.get("last_prompt_tokens", 0))
-            storage.clear("main")
-            await memory.mark_archived(archived_id)
-    else:
-        await memory.mark_archived(req.conversation_id)
-
-    return UpdateGraphResponse(success=True, summary=summary, steps=steps)
-
-
-def format_history(messages: list[dict]) -> str:
-    lines = []
-    for m in messages:
-        role = "用户" if m["role"] == "user" else "助手"
-        content = m.get("content", "")
-        if content:
-            lines.append(f"[{role}]: {content}")
-        if m.get("tool_calls"):
-            for tc in m["tool_calls"]:
-                name = tc.get("function", {}).get("name", "")
-                if name:
-                    lines.append(f"[工具调用: {name}]")
-    return "\n".join(lines)
-
-
-@router.get("/api/conversations")
-async def list_conversations() -> ConversationListResponse:
-    items = [ConversationItem(**c) for c in storage.list_all()]
-    return ConversationListResponse(conversations=items)
-
-
-@router.get("/api/conversations/{conv_id}")
-async def get_conversation(conv_id: str) -> ConversationDetail:
-    data = storage.load(conv_id)
-    if not data:
-        raise HTTPException(status_code=404, detail="对话记录不存在")
-    return ConversationDetail(
-        id=data["id"],
-        title=data.get("title", ""),
-        created_at=data.get("created_at", ""),
-        updated_at=data.get("updated_at", ""),
-        archived=data.get("archived", False),
-        messages=data.get("messages", []),
-    )
-
-
-@router.delete("/api/conversations/{conv_id}")
-async def delete_conv(conv_id: str) -> dict[str, str]:
-    data = storage.load(conv_id)
-    if not data:
-        raise HTTPException(status_code=404, detail="对话记录不存在")
-    await memory.delete_conversation(conv_id)
-    storage.delete(conv_id)
-    return {"status": "deleted"}
-
+# ── 图谱查询端点（无 LLM，只读 SQLite） ─────────────────────
 
 @router.get("/api/graph")
 async def get_graph():
@@ -188,34 +69,46 @@ async def search_graph(query: str = Body(...), top_k: int = Body(5)) -> dict:
     return {"summary": summary, "has_result": bool(summary and summary != no_result)}
 
 
+# ── 图谱工具端点（直调 core/memory） ──────────────────────
+
 def _tool_args(req) -> dict:
     return req.model_dump(exclude_none=True)
 
 
-async def _run_graph_tool(name: str, args: dict) -> GraphToolResponse:
+async def _run_tool(tool_name: str, fn, **kwargs) -> GraphToolResponse:
     log = logger.get()
-    args_preview = json.dumps(args, ensure_ascii=False)[:300]
-    log.info("[opencode-tool] 调用 %s | args=%s", name, args_preview)
-    result = await dispatch(name, args)
-    log.info("[opencode-tool] 结果 %s | result_len=%s", name, len(result or ""))
-    return GraphToolResponse(ok=True, tool=name, result=result)
+    log.info("[tool] 调用 %s | args=%s", tool_name, str(kwargs)[:300])
+    result = await fn(**kwargs)
+    log.info("[tool] 结果 %s | result_len=%s", tool_name, len(result or ""))
+    return GraphToolResponse(ok=True, tool=tool_name, result=result)
 
 
 @router.post("/api/graph/tool/search_memory")
 async def tool_search_memory(req: Annotated[SearchMemoryToolRequest, Body()]) -> GraphToolResponse:
-    return await _run_graph_tool("search_memory", _tool_args(req))
+    return await _run_tool("search_memory", memory.search, query=req.query, top_k=req.top_k)
 
 
 @router.post("/api/graph/tool/save_to_graph")
 async def tool_save_to_graph(req: Annotated[SaveToGraphToolRequest, Body()]) -> GraphToolResponse:
-    return await _run_graph_tool("save_to_graph", _tool_args(req))
+    args = _tool_args(req)
+    return await _run_tool("save_to_graph", memory.save, nodes=args.get("nodes", []), relations=args.get("relations", []), facts=args.get("facts"))
 
 
 @router.post("/api/graph/tool/list_memory")
 async def tool_list_memory(req: Annotated[ListMemoryToolRequest, Body()]) -> GraphToolResponse:
-    return await _run_graph_tool("list_memory", _tool_args(req))
+    return await _run_tool("list_memory", memory.list_memory, mode=req.mode, entity_name=req.entity_name, depth=req.depth)
 
 
 @router.post("/api/graph/tool/delete_from_graph")
 async def tool_delete_from_graph(req: Annotated[DeleteFromGraphToolRequest, Body()]) -> GraphToolResponse:
-    return await _run_graph_tool("delete_from_graph", _tool_args(req))
+    return await _run_tool("delete_from_graph", memory.delete_memory, target_type=req.target_type, target=req.target, rel_type=req.rel_type)
+
+
+@router.post("/api/graph/tool/restore_memory")
+async def tool_restore_memory(req: Annotated[DeleteFromGraphToolRequest, Body()]) -> GraphToolResponse:
+    return await _run_tool("restore_memory", memory.restore, target_type=req.target_type, target=req.target)
+
+
+@router.post("/api/graph/tool/list_deprecated")
+async def tool_list_deprecated() -> GraphToolResponse:
+    return await _run_tool("list_deprecated", memory.list_deprecated)

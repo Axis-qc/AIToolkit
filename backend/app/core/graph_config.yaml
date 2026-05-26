@@ -51,9 +51,9 @@ centers:
         description: "AI的工具和能力范围"
 
   - type: Project
-    name: AIChat
+    name: AIToolkit
     icon: "\U0001F4C1"
-    label: "项目 AIChat"
+    label: "项目 AIToolkit"
     description: "技术栈、关键文件、架构决策"
     is_root: true
     render:
@@ -181,10 +181,10 @@ root_relations:
     to: ["User", "AXIS"]
     rel_type: "服务"
   - from: ["User", "AXIS"]
-    to: ["Project", "AIChat"]
+    to: ["Project", "AIToolkit"]
     rel_type: "开发"
   - from: ["AI", "Midnight"]
-    to: ["Project", "AIChat"]
+    to: ["Project", "AIToolkit"]
     rel_type: "协助开发"
 
 # ----- 提示词文件引用 -----

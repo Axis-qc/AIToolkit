@@ -1,9 +1,0 @@
-{
-  "id": "main",
-  "title": "记忆图谱渲染超过100个节点就开始严重掉帧了",
-  "created_at": "2026-05-11T09:58:13.987304",
-  "updated_at": "2026-05-12T10:31:51.167380",
-  "archived": false,
-  "last_prompt_tokens": 0,
-  "messages": []
-}

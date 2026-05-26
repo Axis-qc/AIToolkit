@@ -2,6 +2,7 @@
   "$schema": "https://opencode.ai/config.json",
   "lsp": true,
   "plugin": [
-    "file:///G:/games/AIChat/.opencode/plugins/kg-memory.ts"
+    "file:///G:/games/AIChat/.opencode/plugins/kg-memory.ts",
+    "file:///G:/games/AIChat/.opencode/plugins/rule-reminder.ts"
   ]
 }

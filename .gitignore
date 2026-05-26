@@ -1,0 +1,28 @@
+# ── 开头文件忽略（.gitignore 除外）──
+.*
+!.gitignore
+
+# ── Python ──
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ── Node ──
+node_modules/
+dist/
+
+# ── 运行时数据 ──
+backend/data/
+logs/
+*.log
+*.pkl
+
+# ── 环境配置 ──
+.env
+.env.local
+
+# ── 临时文件 ──
+backend/_temp_*
+backend/scripts/

@@ -38,7 +38,9 @@ class SaveToGraphToolRequest(BaseModel):
 
 
 class ListMemoryToolRequest(BaseModel):
-    otype: str = "all"
+    mode: str = "keywords"
+    entity_name: str | None = None
+    depth: int = 2
 
 
 class DeleteFromGraphToolRequest(BaseModel):

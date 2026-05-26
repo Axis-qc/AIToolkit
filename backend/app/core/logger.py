@@ -11,7 +11,7 @@ def init() -> logging.Logger:
     global _logger
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    _logger = logging.getLogger("aichat")
+    _logger = logging.getLogger("aitoolkit")
     _logger.setLevel(logging.DEBUG)
     _logger.handlers.clear()
 
@@ -31,7 +31,7 @@ def init() -> logging.Logger:
     _logger.addHandler(sh)
 
     _logger.info("=" * 50)
-    _logger.info("AIChat 后端启动")
+    _logger.info("AIToolkit 后端启动")
     return _logger
 
 
@@ -43,6 +43,6 @@ def get() -> logging.Logger:
 
 def close():
     if _logger is not None:
-        _logger.info("AIChat 后端关闭")
+        _logger.info("AIToolkit 后端关闭")
         for h in _logger.handlers:
             h.close()

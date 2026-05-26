@@ -1,6 +1,4 @@
-from .config import settings
 from . import graph
-from . import storage
 from . import config_loader
 
 
@@ -95,90 +93,23 @@ async def save(nodes: list[dict], relations: list[dict], facts: list[dict] | Non
     return "已写入图谱"
 
 
-async def index_conversation(conv_id: str, file_path: str, title: str):
-    await graph.index_conversation(conv_id, file_path, title)
-
-
-async def mark_archived(conv_id: str):
-    await graph.mark_archived(conv_id)
-    storage.mark_archived_file(conv_id)
-
-
-def _get_update_prompt() -> str:
-    return config_loader.render_prompt("graph_update",
-        center_list=config_loader.build_center_list_md(),
-        category_list=config_loader.build_category_list_md())
-
-
-def _format_history(messages: list[dict]) -> str:
-    lines = []
-    for m in messages:
-        role = "用户" if m["role"] == "user" else "助手"
-        content = m.get("content", "")
-        if content:
-            lines.append(f"[{role}]: {content}")
-        if m.get("tool_calls"):
-            for tc in m["tool_calls"]:
-                name = tc.get("function", {}).get("name", "")
-                if name:
-                    lines.append(f"[工具调用: {name}]")
-    return "\n".join(lines)
-
-
-async def archive_conversation(conv_id: str):
-    import httpx
-    import json as _json
-    from openai import AsyncOpenAI
-    from app.tools import TOOL_DEFINITIONS, dispatch
-    from .config import settings
-
-    data = storage.load(conv_id)
-    if not data or not data.get("messages"):
-        return
-
-    conversation_text = _format_history(data["messages"])
-    msgs = [
-        {"role": "system", "content": _get_update_prompt()},
-        {"role": "user", "content": conversation_text},
-    ]
-
-    client = AsyncOpenAI(
-        api_key=settings.chat_api_key,
-        base_url=settings.chat_base_url,
-        http_client=httpx.AsyncClient(trust_env=False),
-    )
-
-    response = await client.chat.completions.create(
-        model=settings.chat_model,
-        messages=msgs,
-        tools=TOOL_DEFINITIONS,
-        tool_choice="auto",
-    )
-
-    msg = response.choices[0].message
-    if msg.tool_calls:
-        for tc in msg.tool_calls:
-            args = _json.loads(tc.function.arguments) if tc.function.arguments else {}
-            await dispatch(tc.function.name, args, conv_id=conv_id)
-
-    await mark_archived(conv_id)
 
 
 async def delete_memory(target_type: str, target: str, rel_type: str | None = None) -> str:
-    """删除图谱中的记忆。target_type: entity | fact | relation"""
+    """软删除图谱中的记忆（标记 deprecated_at，24h 后自动清理）。"""
     if target_type == "entity":
-        ok = await graph.delete_entity(target)
+        ok = await graph.soft_delete_entity(target)
         if ok:
-            return f"已删除实体「{target}」及其所有关联关系和事实"
+            return f"已标记实体「{target}」为作废，24 小时后自动清理，期间可恢复"
         return f"未找到实体「{target}」"
     elif target_type == "fact":
         try:
             fact_id = int(target.strip())
         except ValueError:
             return "错误：删除 fact 需要提供数字 ID"
-        ok = await graph.delete_fact(fact_id)
+        ok = await graph.soft_delete_fact(fact_id)
         if ok:
-            return f"已删除事实 #{fact_id}"
+            return f"已标记事实 #{fact_id} 为作废，24 小时后自动清理，期间可恢复"
         return f"未找到事实 #{fact_id}"
     elif target_type == "relation":
         # target 格式: "from_name||to_name" 或 "from_name||to_name||rel_type"
@@ -192,36 +123,169 @@ async def delete_memory(target_type: str, target: str, rel_type: str | None = No
             return f"已删除 {count} 条关系"
         return "未找到匹配的关系"
     elif target_type == "fact_by_content":
-        # 根据内容关键词删除事实
-        facts = await graph.list_all_facts(500)
+        # 根据内容关键词软删除事实（SQL LIKE，不再全量拉取）
+        facts = await graph.search_facts_by_keyword(target)
         deleted = 0
         for f in facts:
-            if target.lower() in f["content"].lower():
-                await graph.delete_fact(f["id"])
-                deleted += 1
+            await graph.soft_delete_fact(f["id"])
+            deleted += 1
         if deleted > 0:
-            return f"已删除 {deleted} 条匹配的事实"
+            return f"已标记 {deleted} 条匹配的事实为作废，24 小时后自动清理，期间可恢复"
         return "未找到匹配的事实"
     else:
         return f"未知的删除目标类型: {target_type}"
 
 
-async def list_memory(otype: str = "all") -> str:
-    """列出图谱中的内容，用于浏览。otype: entities | facts | all"""
-    lines = []
-    if otype in ("entities", "all"):
-        entities = await graph.list_all_entities()
-        lines.append(f"## 实体 ({len(entities)} 个)")
+async def list_memory(mode: str = "keywords", entity_name: str | None = None, depth: int = 2) -> str:
+    """浏览图谱。两种模式：
+    - keywords: 列出所有实体名称+类型（轻量，不带 facts/properties）
+    - neighborhood: 查看指定实体的 N 层关联子图
+    """
+    inj = config_loader.get_injection_config()
+
+    if mode == "keywords":
+        entities = await graph.list_entity_keywords()
+        if not entities:
+            return inj.get("no_result", "图谱为空")
+        lines = [f"共 {len(entities)} 个实体:"]
         for e in entities:
-            lines.append(f"- [{e['type']}] {e['name']}")
-    if otype in ("facts", "all"):
-        facts = await graph.list_all_facts(500)
-        lines.append(f"## 事实 ({len(facts)} 条)")
-        for f in facts:
-            about = ", ".join(f["about_entities"]) if f["about_entities"] else "(无关联实体)"
-            lines.append(f"- #{f['id']} [{f['type']}] {f['content'][:80]} （关联: {about}）")
-    return "\n".join(lines) if lines else "图谱为空"
+            pin = " [固定]" if e["pinned"] else ""
+            lines.append(f"- [{e['type']}] {e['name']} (重要度:{e['importance']}{pin})")
+        return "\n".join(lines)
+
+    elif mode == "neighborhood":
+        if not entity_name:
+            return "错误：neighborhood 模式需要提供 entity_name"
+        data = await graph.get_entity_neighborhood(entity_name, depth)
+        if data.get("error"):
+            return data["error"]
+
+        center = data["center"]
+        lines = [f"## {center['name']} [{center['type']}] (重要度:{center['importance']})"]
+        if center.get("pinned"):
+            lines[-1] += " [固定]"
+        if center.get("facts"):
+            for f in center["facts"]:
+                lines.append(f"- 事实: {f['content']}")
+
+        entities_info = data.get("entities", {})
+        for i, layer in enumerate(data.get("layers", []), 1):
+            if not layer:
+                continue
+            lines.append(f"\n### 第 {i} 层关系 ({len(layer)} 条)")
+            for edge in layer:
+                arrow = f"[{edge['from_name']}]-[{edge['rel_type']}]->[{edge['to_name']}]"
+                lines.append(f"- {arrow}")
+
+        # 实体摘要
+        if entities_info:
+            lines.append(f"\n### 涉及实体 ({len(entities_info)} 个)")
+            for name, info in entities_info.items():
+                pin = " [固定]" if info.get("pinned") else ""
+                fc = f", {info.get('facts_count', 0)}条事实" if info.get("facts_count") else ""
+                lines.append(f"- [{info['type']}] {name} (重要度:{info['importance']}{fc}{pin})")
+
+        return "\n".join(lines)
+
+    else:
+        return f"未知的 list_memory 模式: {mode}，支持 keywords / neighborhood"
 
 
 async def delete_conversation(conv_id: str):
     await graph.delete_conversation(conv_id)
+
+
+async def restore(target_type: str, target: str) -> str:
+    """恢复已软删除的记忆。target_type: entity / fact"""
+    if target_type == "entity":
+        ok = await graph.restore_entity(target)
+        if ok:
+            return f"已恢复实体「{target}」"
+        return f"未找到已作废的实体「{target}」"
+    elif target_type == "fact":
+        try:
+            fact_id = int(target.strip())
+        except ValueError:
+            return "错误：恢复 fact 需要提供数字 ID"
+        ok = await graph.restore_fact(fact_id)
+        if ok:
+            return f"已恢复事实 #{fact_id}"
+        return f"未找到已作废的事实 #{fact_id}"
+    else:
+        return f"未知的恢复目标类型: {target_type}"
+
+
+async def list_deprecated() -> str:
+    """列出所有已软删除待清理的实体和事实。"""
+    data = await graph.list_deprecated()
+    lines = []
+    if data["entities"]:
+        lines.append(f"## 已作废实体 ({len(data['entities'])} 个)")
+        for e in data["entities"]:
+            lines.append(f"- [{e['type']}] {e['name']}（{e['deprecated_at']}）")
+    if data["facts"]:
+        lines.append(f"## 已作废事实 ({len(data['facts'])} 条)")
+        for f in data["facts"]:
+            lines.append(f"- #{f['id']} {f['content']}（{f['deprecated_at']}）")
+    if not lines:
+        return "没有已作废的内容"
+    return "\n".join(lines)
+
+
+async def update(target_type: str, target: str, updates: dict) -> str:
+    """更新图谱中的记忆。支持更新事实内容和实体属性。"""
+    if target_type == "fact":
+        try:
+            fact_id = int(target.strip())
+        except ValueError:
+            return "错误：更新 fact 需要提供数字 ID"
+        ok = await graph.update_fact(
+            fact_id,
+            content=updates.get("content"),
+            ftype=updates.get("type"),
+            about_entities=updates.get("about_entities"),
+        )
+        if ok:
+            return f"已更新事实 #{fact_id}"
+        return f"未找到事实 #{fact_id}"
+
+    elif target_type == "entity":
+        ok = await graph.update_entity(
+            target,
+            new_type=updates.get("type"),
+            new_props=updates.get("properties"),
+        )
+        if ok:
+            return f"已更新实体「{target}」"
+        return f"未找到实体「{target}」"
+
+    elif target_type == "entity_importance":
+        imp = updates.get("importance")
+        if imp is None:
+            return "错误：更新 entity_importance 需要提供 importance 字段"
+        ok = await graph.update_entity(target, new_type=None, new_props=None)
+        if not ok:
+            return f"未找到实体「{target}」"
+        await graph.set_importance(target, imp)
+        return f"已更新实体「{target}」重要度为 {imp}"
+
+    elif target_type == "entity_pinned":
+        pinned = updates.get("pinned")
+        if pinned is None:
+            return "错误：更新 entity_pinned 需要提供 pinned 字段"
+        ok = await graph.update_entity(target, new_type=None, new_props=None)
+        if not ok:
+            return f"未找到实体「{target}」"
+        await graph.set_pinned(target, bool(pinned))
+        return f"已更新实体「{target}」固定状态为 {bool(pinned)}"
+
+    else:
+        return f"未知的更新目标类型: {target_type}，支持: fact / entity / entity_importance / entity_pinned"
+
+
+async def merge(source: str, target: str) -> str:
+    """将源实体合并到目标实体。"""
+    try:
+        return await graph.merge_entities(source, target)
+    except Exception as e:
+        return f"(无法合并实体: {e})"

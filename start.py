@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 BACKEND = ROOT / "backend"
-FRONTEND = ROOT / "web" / "AIChat"
+FRONTEND = ROOT / "web" / "aitoolkit"
 LOG_DIR = ROOT / "logs"
 
 
