@@ -1,3 +1,4 @@
+# FastAPI 应用入口：CORS 中间件、lifespan 生命周期管理、静态文件挂载、路由注册
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI
@@ -7,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from app.core import graph
 from app.core import logger
 from app.api.graph import router as graph_router
-from app import mcp_server  # MCP SSE 端点，直连 core/memory，不走缓存
+from app import mcp_server  # MCP SSE 端点
 
 
 @asynccontextmanager
@@ -39,7 +40,7 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 # ── MCP SSE 端点 ──────────────────────────────────────
 # 暴露知识图谱工具供外部 MCP 客户端（Reasonix、Claude Desktop 等）调用。
-# 所有工具直接调 core/memory → SQLite，不走缓存。
+# 所有工具直接调 core/memory → SQLite
 # 客户端连接地址：http://127.0.0.1:18000/mcp/sse
 # ───────────────────────────────────────────────────────
 app.mount("/mcp", mcp_server.mcp.sse_app())

@@ -1,3 +1,4 @@
+# 应用配置管理：使用 pydantic-settings 加载 .env 配置文件，提供文件工具白名单等功能
 from pathlib import Path
 from pydantic_settings import BaseSettings
 

@@ -20,6 +20,8 @@ from .graph_crud import (
     update_entity,
     delete_entity,
     list_entity_keywords,
+    list_entity_types_summary,
+    list_entities_by_type,
     upsert_relation,
     delete_relation,
     create_fact,

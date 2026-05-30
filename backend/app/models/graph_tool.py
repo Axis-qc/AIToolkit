@@ -1,3 +1,4 @@
+# Pydantic 数据模型：定义图谱工具的请求/响应数据结构，包括节点、关系、事实等类型
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -38,9 +39,7 @@ class SaveToGraphToolRequest(BaseModel):
 
 
 class ListMemoryToolRequest(BaseModel):
-    mode: str = "keywords"
-    entity_name: str | None = None
-    depth: int = 2
+    type: str | None = None
 
 
 class DeleteFromGraphToolRequest(BaseModel):

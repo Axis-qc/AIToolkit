@@ -60,6 +60,45 @@ async def list_entity_keywords() -> list[dict]:
     ]
 
 
+async def list_entity_types_summary() -> list[dict]:
+    """按类型汇总实体数量，用于类型级概览。"""
+    db = await _connect()
+    cur = await db.execute(
+        "SELECT type, COUNT(*) as cnt FROM entities WHERE deprecated_at IS NULL GROUP BY type ORDER BY cnt DESC"
+    )
+    return [{"type": r["type"], "count": r["cnt"]} for r in await cur.fetchall()]
+
+
+async def list_entities_by_type(entity_type: str, limit: int = 50) -> list[dict]:
+    """按类型列出实体+子节点数（关系邻居数）。"""
+    db = await _connect()
+    cur = await db.execute(
+        """
+        SELECT e.name, e.type, e.importance, e.pinned,
+               COUNT(DISTINCT CASE WHEN r.from_name = e.name THEN r.to_name ELSE r.from_name END) AS child_count
+        FROM entities e
+        LEFT JOIN relations r
+            ON r.deprecated_at IS NULL
+            AND (r.from_name = e.name OR r.to_name = e.name)
+        WHERE e.deprecated_at IS NULL AND e.type = ?
+        GROUP BY e.name
+        ORDER BY e.importance DESC, e.name
+        LIMIT ?
+        """,
+        (entity_type, limit),
+    )
+    return [
+        {
+            "name": r["name"],
+            "type": r["type"],
+            "importance": r["importance"],
+            "pinned": bool(r["pinned"]),
+            "child_count": r["child_count"],
+        }
+        for r in await cur.fetchall()
+    ]
+
+
 # ── 关系 CRUD ───────────────────────────────────────────
 
 
@@ -76,17 +115,18 @@ async def upsert_relation(
 
 
 async def delete_relation(from_name: str, to_name: str, rel_type: str | None = None) -> int:
-    """删除匹配的关系。如果指定 rel_type 则精确匹配，否则删除所有。返回删除行数。"""
+    """软删除匹配的关系（标记 deprecated_at）。返回删除行数。"""
     db = await _connect()
+    now = datetime.now(timezone.utc).isoformat()
     if rel_type:
         cur = await db.execute(
-            "DELETE FROM relations WHERE from_name=? AND to_name=? AND rel_type=?",
-            (from_name, to_name, rel_type),
+            "UPDATE relations SET deprecated_at=? WHERE from_name=? AND to_name=? AND rel_type=? AND deprecated_at IS NULL",
+            (now, from_name, to_name, rel_type),
         )
     else:
         cur = await db.execute(
-            "DELETE FROM relations WHERE from_name=? AND to_name=?",
-            (from_name, to_name),
+            "UPDATE relations SET deprecated_at=? WHERE from_name=? AND to_name=? AND deprecated_at IS NULL",
+            (now, from_name, to_name),
         )
     await db.commit()
     return cur.rowcount
@@ -242,14 +282,17 @@ async def set_importance(entity_name: str, importance: int):
 
 
 async def soft_delete_entity(name: str) -> bool:
-    """软删除实体：标记 deprecated_at=now，硬删其所有关系。返回是否找到。"""
+    """软删除实体：标记 deprecated_at=now，同时软删其所有关系。返回是否找到。"""
     db = await _connect()
     cur = await db.execute("SELECT name FROM entities WHERE name=? AND deprecated_at IS NULL", (name,))
     if not await cur.fetchone():
         return False
     now = datetime.now(timezone.utc).isoformat()
     await db.execute("UPDATE entities SET deprecated_at=? WHERE name=?", (now, name))
-    await db.execute("DELETE FROM relations WHERE from_name=? OR to_name=?", (name, name))
+    await db.execute(
+        "UPDATE relations SET deprecated_at=? WHERE (from_name=? OR to_name=?) AND deprecated_at IS NULL",
+        (now, name, name),
+    )
     await db.execute("DELETE FROM conversation_mentions WHERE entity_name=?", (name,))
     await db.commit()
     await cleanup_expired()
@@ -270,12 +313,16 @@ async def soft_delete_fact(fact_id: int) -> bool:
 
 
 async def restore_entity(name: str) -> bool:
-    """恢复软删除的实体：清除 deprecated_at 标记。"""
+    """恢复软删除的实体：清除 deprecated_at 标记，同时恢复其所有软删除的关系。"""
     db = await _connect()
     cur = await db.execute("SELECT name FROM entities WHERE name=? AND deprecated_at IS NOT NULL", (name,))
     if not await cur.fetchone():
         return False
     await db.execute("UPDATE entities SET deprecated_at=NULL WHERE name=?", (name,))
+    await db.execute(
+        "UPDATE relations SET deprecated_at=NULL WHERE deprecated_at IS NOT NULL AND (from_name=? OR to_name=?)",
+        (name, name),
+    )
     await db.commit()
     return True
 
@@ -292,7 +339,7 @@ async def restore_fact(fact_id: int) -> bool:
 
 
 async def list_deprecated() -> list[dict]:
-    """列出所有已软删除待清理的实体和事实。"""
+    """列出所有已软删除待清理的实体、事实和关系。"""
     db = await _connect()
     cur = await db.execute(
         "SELECT name, type, properties, importance, deprecated_at FROM entities WHERE deprecated_at IS NOT NULL ORDER BY deprecated_at DESC"
@@ -302,7 +349,14 @@ async def list_deprecated() -> list[dict]:
         "SELECT id, content, type, about_entities, deprecated_at FROM facts WHERE deprecated_at IS NOT NULL ORDER BY deprecated_at DESC"
     )
     facts = [{"id": r["id"], "content": r["content"][:80], "type": r["type"], "deprecated_at": r["deprecated_at"]} for r in await cur.fetchall()]
-    return {"entities": entities, "facts": facts}
+    cur = await db.execute(
+        "SELECT id, from_type, from_name, to_type, to_name, rel_type, deprecated_at FROM relations WHERE deprecated_at IS NOT NULL ORDER BY deprecated_at DESC"
+    )
+    relations = [
+        {"id": r["id"], "from": f"{r['from_type']}|{r['from_name']}", "to": f"{r['to_type']}|{r['to_name']}", "rel_type": r["rel_type"], "deprecated_at": r["deprecated_at"]}
+        for r in await cur.fetchall()
+    ]
+    return {"entities": entities, "facts": facts, "relations": relations}
 
 
 # ── 合并 ────────────────────────────────────────────────
@@ -331,7 +385,7 @@ async def merge_entities(source: str, target: str) -> str:
 
     # 1. 迁移出边
     for edge in await (await db.execute(
-        "SELECT from_type, to_type, to_name, rel_type, properties FROM relations WHERE from_name=?",
+        "SELECT from_type, to_type, to_name, rel_type, properties FROM relations WHERE from_name=? AND deprecated_at IS NULL",
         (source,),
     )).fetchall():
         await db.execute(
@@ -343,7 +397,7 @@ async def merge_entities(source: str, target: str) -> str:
 
     # 2. 迁移入边
     for edge in await (await db.execute(
-        "SELECT from_type, from_name, to_type, rel_type, properties FROM relations WHERE to_name=?",
+        "SELECT from_type, from_name, to_type, rel_type, properties FROM relations WHERE to_name=? AND deprecated_at IS NULL",
         (source,),
     )).fetchall():
         await db.execute(
@@ -447,7 +501,7 @@ async def get_entity_neighborhood(entity_name: str, depth: int = 2) -> dict:
         cur = await db.execute(f"""
             SELECT from_type, from_name, rel_type, to_type, to_name
             FROM relations
-            WHERE from_name IN ({placeholders}) OR to_name IN ({placeholders})
+            WHERE deprecated_at IS NULL AND (from_name IN ({placeholders}) OR to_name IN ({placeholders}))
         """, current_level + current_level)
 
         next_level_set: set[str] = set()

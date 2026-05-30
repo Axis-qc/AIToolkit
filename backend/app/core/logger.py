@@ -1,3 +1,4 @@
+# 日志管理模块：初始化日志记录器，支持文件和控制台双输出，用于应用调试和运行监控
 import logging
 import sys
 from pathlib import Path

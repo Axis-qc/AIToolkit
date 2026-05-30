@@ -152,6 +152,23 @@ async function loadFacts(node: TreeNode) {
 
 function closePanel() { selectedId.value = null }
 
+// ===== 循环检测：收集祖先 entityId 集合 =====
+function getAncestorEntityIds(node: TreeNode): Set<string> {
+  const ancestors = new Set<string>()
+  let current: TreeNode | undefined = node
+  while (current) {
+    ancestors.add(current.entityId)
+    // 通过 parentKey 在 flatRows 中找父节点
+    if (current.parentKey) {
+      const parentRow = flatRows.value.find(r => r.key === current!.parentKey)
+      current = parentRow?.node
+    } else {
+      current = undefined
+    }
+  }
+  return ancestors
+}
+
 // ===== 展开/折叠 =====
 async function toggleExpand(row: FlatRow) {
   const node = row.node
@@ -166,8 +183,11 @@ async function toggleExpand(row: FlatRow) {
   try {
     const data = await fetchChildren(node.type, node.name)
     node.loaded = true
+    const ancestors = getAncestorEntityIds(node)
     for (const gn of data.nodes) {
       const childEntityId = gn.id || `${gn.type}|${gn.name}`
+      // 跳过已在祖先路径中的节点，防止循环引用
+      if (ancestors.has(childEntityId)) continue
       const hasChild = data.has_children?.[childEntityId] ?? false
       const child = createTreeNode(gn, node.key, hasChild)
       node.children.push(child)
@@ -211,8 +231,10 @@ async function toggleExpandDirect(node: TreeNode) {
   try {
     const data = await fetchChildren(node.type, node.name)
     node.loaded = true
+    const ancestors = getAncestorEntityIds(node)
     for (const gn of data.nodes) {
       const childEntityId = gn.id || `${gn.type}|${gn.name}`
+      if (ancestors.has(childEntityId)) continue
       const hasChild = data.has_children?.[childEntityId] ?? false
       node.children.push(createTreeNode(gn, node.key, hasChild))
     }
