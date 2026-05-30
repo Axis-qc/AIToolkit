@@ -96,14 +96,14 @@ AIToolkit/
 
 ### 1. `search_memory`
 
-搜索长期记忆。按自然语言查询匹配实体和事实。
+搜索长期记忆。按自然语言查询匹配实体。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `query` | string | 搜索关键词（必填） |
 | `top_k` | int | 返回结果数（默认 5） |
 
-返回值：`list[dict]`，每个元素包含 `entity`、`type`、`facts`、`importance`、`pinned`。
+返回值：`list[dict]`，每个元素包含 `entity`、`type`、`importance`、`pinned`。
 
 ### 2. `save_to_graph`
 
@@ -119,7 +119,11 @@ AIToolkit/
 
 ### 3. `list_memory`
 
-列出知识图谱中的固定实体。无参数。
+分层浏览知识图谱。无参数时返回类型概览；传入 type 列出该类型下所有实体。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `type` | string | （可选）实体类型，如 `User`/`AI`/`Project`。不传则返回类型概览 |
 
 ### 4. `delete_from_graph`
 

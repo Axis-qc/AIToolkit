@@ -115,25 +115,9 @@ async def search_entities(query: str, top_k: int) -> list[dict]:
 
     results = []
     for name, etype, props_json, importance, pinned, score in scored[:top_k]:
-        entity_facts = []
-        for about_entities, content, ftype in all_facts:
-            if name in about_entities:
-                entity_facts.append({"content": content, "type": ftype})
-                if len(entity_facts) >= 3:
-                    break
-
-        cur = await db.execute(
-            "SELECT to_name FROM relations WHERE from_name=? AND deprecated_at IS NULL"
-            " UNION SELECT from_name FROM relations WHERE to_name=? AND deprecated_at IS NULL"
-            " LIMIT 5",
-            (name, name),
-        )
-        related = [r[0] for r in await cur.fetchall()]
-
         results.append({
             "entity": name,
             "type": etype,
-            "facts": entity_facts,
             "importance": importance,
             "pinned": bool(pinned),
         })
