@@ -77,10 +77,8 @@ AIToolkit/
 │       │   ├── graph_crud.py     # 实体/关系/事实 CRUD、软删除、合并、邻域 BFS
 │       │   ├── graph_search.py   # 搜索引擎（CJK 分词 + 权重计分）
 │       │   ├── graph_view.py     # 前端可视化专用查询
-│       │   ├── memory.py         # 业务编排（格式化 + 调 graph 子模块）
+│       │   ├── memory.py         # 业务编排（直调 graph 子模块）
 │       │   ├── config.py         # pydantic-settings 配置
-│       │   ├── config_loader.py  # graph_config.yaml 加载器
-│       │   ├── graph_config.yaml # 图谱根实体/类型/渲染配置
 │       │   └── logger.py         # 日志
 │       └── models/
 │           └── graph_tool.py     # 请求/响应 Pydantic 模型
@@ -92,35 +90,9 @@ AIToolkit/
 
 ---
 
-## 配置指南
-
-### 图谱配置（`graph_config.yaml`）
-
-定义知识图谱的根实体（中心）、类型体系、渲染规则：
-
-```yaml
-centers:
-  - type: User
-    name: AXIS
-    is_root: true
-    categories:
-      - name: 偏好习惯
-      - name: 计划目标
-      - name: 事实经历
-
-entity_types:
-  User:    { icon: "👤", label_prefix: "关于你" }
-  Project: { icon: "📁", label_prefix: "项目" }
-  AI:      { icon: "🤖", label_prefix: "关于我" }
-```
-
-每次启动时 `init_db()` 自动创建/同步根实体和分类。
-
----
-
 ## 工具参考
 
-通过 MCP 暴露的 7 个知识图谱工具：
+通过 MCP 暴露的 8 个知识图谱工具：
 
 ### 1. `search_memory`
 
@@ -130,6 +102,8 @@ entity_types:
 |------|------|------|
 | `query` | string | 搜索关键词（必填） |
 | `top_k` | int | 返回结果数（默认 5） |
+
+返回值：`list[dict]`，每个元素包含 `entity`、`type`、`facts`、`importance`、`pinned`。
 
 ### 2. `save_to_graph`
 
@@ -145,17 +119,11 @@ entity_types:
 
 ### 3. `list_memory`
 
-浏览图谱。两种模式：轻量索引和关联子图展开。
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `mode` | string | `keywords`（列出所有实体名称+类型）/ `neighborhood`（查看指定实体的 N 层关联子图） |
-| `entity_name` | string | `neighborhood` 模式必填，指定实体名称 |
-| `depth` | int | `neighborhood` 模式展开层数（默认 2，最大 3） |
+列出知识图谱中的固定实体。无参数。
 
 ### 4. `delete_from_graph`
 
-删除实体、事实或关系。按实体名称或事实 ID 定位。
+软删除实体、事实或关系。标记为作废，24 小时后自动物理删除，期间可用 `restore_memory` 恢复。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
@@ -174,7 +142,16 @@ entity_types:
 | `entity_importance` | 实体名称 | `importance`(1-10) |
 | `entity_pinned` | 实体名称 | `pinned`(true/false) |
 
-### 6. `restore_memory`
+### 6. `merge_entities`
+
+将源实体合并到目标实体：迁移所有关系、事实、属性，然后软删除源实体。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `source` | string | 源实体名称（合并后被删除） |
+| `target` | string | 目标实体名称（接收所有数据） |
+
+### 7. `restore_memory`
 
 恢复已软删除的实体或事实。软删除后 24 小时内可恢复。
 
@@ -183,7 +160,7 @@ entity_types:
 | `target_type` | string | `entity`（按名称）/ `fact`（按 ID） |
 | `target` | string | 实体名称或事实数字 ID |
 
-### 7. `list_deprecated`
+### 8. `list_deprecated`
 
 列出所有已软删除待清理的实体和事实（24 小时后自动物理删除）。无参数。
 
@@ -196,12 +173,10 @@ entity_types:
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/graph` | 全量图谱（节点+边+事实） |
-| GET | `/api/graph/roots` | 根实体列表 |
+| GET | `/api/graph/roots` | 根实体列表（is_root=1） |
 | GET | `/api/graph/children?type=&name=` | 子节点 |
 | GET | `/api/graph/facts?type=&name=` | 实体关联事实 |
 | GET | `/api/graph/orphans` | 无关联的孤岛实体 |
-| GET | `/api/graph/config` | 图谱配置 |
-| POST | `/api/graph/search` | 关键词搜索记忆 |
 
 ### 工具调用（REST）
 
@@ -234,11 +209,9 @@ AI 客户端 / 前端           后端                            SQLite
     │                      │                               │
     ├── search_memory ────►│──► memory.search              │
     │                      │    └► graph_search ──────────►│
-    │                      │◄─── 格式化结果 ◄─────────────│
+    │                      │◄─── 原始结果 ◄───────────────│
     │                      │                               │
-    ├── list_memory ──────►│──► memory.list_memory         │
-    │                      │    ├► graph_crud (keywords)   │
-    │                      │    └► graph_crud (neighborhood)│
+    ├── list_memory ──────►│──► memory.list_memory ────────►│
     │                      │                               │
     └── delete_from_graph ►│──► memory.delete_memory ─────►│
 ```

@@ -4,7 +4,6 @@
 """
 import json
 
-from . import config_loader
 from .db import _connect
 
 
@@ -23,7 +22,7 @@ async def get_all_graph() -> dict:
         })
 
     cur = await db.execute(
-        "SELECT from_type, from_name, to_type, to_name, rel_type FROM relations"
+        "SELECT from_type, from_name, to_type, to_name, rel_type FROM relations WHERE deprecated_at IS NULL"
     )
     edges = []
     for row in await cur.fetchall():
@@ -48,65 +47,20 @@ async def get_all_graph() -> dict:
 
 
 async def get_roots() -> dict:
-    """返回根节点：配置根实体 + 工具标记的固定实体（pinned=1）"""
+    """返回根节点：is_root=1 的实体"""
     db = await _connect()
-    root_ids = config_loader.get_root_node_ids()
-    seen = set()
+    cur = await db.execute(
+        "SELECT name, type, importance, pinned FROM entities WHERE is_root=1 AND deprecated_at IS NULL"
+    )
     nodes = []
-
-    # 1) 配置中的根实体
-    if root_ids:
-        for rid in root_ids:
-            parts = rid.split("|", 1)
-            if len(parts) != 2:
-                continue
-            etype, ename = parts
-            cur = await db.execute(
-                "SELECT name, type, properties, importance, pinned FROM entities WHERE name=? AND type=?",
-                (ename, etype),
-            )
-            row = await cur.fetchone()
-            if row:
-                nodes.append({
-                    "id": rid,
-                    "name": row["name"],
-                    "type": row["type"],
-                    "importance": row["importance"],
-                    "pinned": bool(row["pinned"]),
-                })
-                seen.add(rid)
-
-        # 2) 数据库中标为 pinned 但不在配置中的实体
-        cur = await db.execute(
-            "SELECT name, type, properties, importance, pinned FROM entities WHERE pinned=1 AND deprecated_at IS NULL"
-        )
-        for row in await cur.fetchall():
-            eid = f"{row['type']}|{row['name']}"
-            if eid not in seen:
-                nodes.append({
-                    "id": eid,
-                    "name": row["name"],
-                    "type": row["type"],
-                    "importance": row["importance"],
-                    "pinned": True,
-                })
-                seen.add(eid)
-    else:
-        cur = await db.execute("SELECT name, type, properties, importance, pinned FROM entities")
-        all_entities = await cur.fetchall()
-        cur = await db.execute("SELECT DISTINCT to_type, to_name FROM relations")
-        has_incoming = set(f"{r['to_type']}|{r['to_name']}" for r in await cur.fetchall())
-        for row in all_entities:
-            eid = f"{row['type']}|{row['name']}"
-            if eid not in has_incoming:
-                nodes.append({
-                    "id": eid,
-                    "name": row["name"],
-                    "type": row["type"],
-                    "importance": row["importance"],
-                    "pinned": bool(row["pinned"]),
-                })
-
+    for row in await cur.fetchall():
+        nodes.append({
+            "id": f"{row['type']}|{row['name']}",
+            "name": row["name"],
+            "type": row["type"],
+            "importance": row["importance"],
+            "pinned": bool(row["pinned"]),
+        })
     return {"nodes": nodes, "edges": []}
 
 
@@ -118,7 +72,7 @@ async def get_children(entity_type: str, entity_name: str) -> dict:
 
     # 1) 出边
     cur = await db.execute(
-        "SELECT to_type, to_name, rel_type FROM relations WHERE from_type=? AND from_name=?",
+        "SELECT to_type, to_name, rel_type FROM relations WHERE from_type=? AND from_name=? AND deprecated_at IS NULL",
         (entity_type, entity_name),
     )
     for r in await cur.fetchall():
@@ -133,7 +87,7 @@ async def get_children(entity_type: str, entity_name: str) -> dict:
 
     # 2) 入边
     cur = await db.execute(
-        "SELECT from_type, from_name, rel_type FROM relations WHERE to_type=? AND to_name=?",
+        "SELECT from_type, from_name, rel_type FROM relations WHERE to_type=? AND to_name=? AND deprecated_at IS NULL",
         (entity_type, entity_name),
     )
     for r in await cur.fetchall():
@@ -173,7 +127,7 @@ async def get_children(entity_type: str, entity_name: str) -> dict:
         cur = await db.execute(f"""
             SELECT from_type, from_name, COUNT(*) AS cnt
             FROM relations
-            WHERE (from_type, from_name) IN ({placeholders})
+            WHERE deprecated_at IS NULL AND (from_type, from_name) IN ({placeholders})
             GROUP BY from_type, from_name
         """, flat)
         has_outgoing = {f"{r['from_type']}|{r['from_name']}": r['cnt'] > 0 for r in await cur.fetchall()}
@@ -188,18 +142,23 @@ async def get_children(entity_type: str, entity_name: str) -> dict:
 async def get_orphans() -> dict:
     """返回所有无边孤岛实体（排除根节点）"""
     db = await _connect()
-    root_ids = config_loader.get_root_node_ids()
 
-    cur = await db.execute("SELECT name, type, properties, importance, pinned FROM entities WHERE deprecated_at IS NULL")
+    cur = await db.execute(
+        "SELECT name, type, importance, pinned FROM entities "
+        "WHERE deprecated_at IS NULL AND is_root=0"
+    )
     all_entities = await cur.fetchall()
 
-    cur = await db.execute("SELECT DISTINCT from_type, from_name FROM relations UNION SELECT DISTINCT to_type, to_name FROM relations")
+    cur = await db.execute(
+        "SELECT DISTINCT from_type, from_name FROM relations WHERE deprecated_at IS NULL "
+        "UNION SELECT DISTINCT to_type, to_name FROM relations WHERE deprecated_at IS NULL"
+    )
     connected = set(f"{r['from_type']}|{r['from_name']}" for r in await cur.fetchall())
 
     nodes = []
     for row in all_entities:
         eid = f"{row['type']}|{row['name']}"
-        if eid not in connected and eid not in root_ids:
+        if eid not in connected:
             nodes.append({
                 "id": eid,
                 "name": row["name"],

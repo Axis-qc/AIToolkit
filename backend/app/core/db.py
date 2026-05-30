@@ -8,8 +8,6 @@ from pathlib import Path
 
 import aiosqlite
 
-from . import config_loader
-
 DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "graph.db"
 _db = None
 _db_lock = asyncio.Lock()
@@ -92,6 +90,17 @@ async def init_db():
         await db.execute("ALTER TABLE entities ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
     except Exception:
         pass
+    try:
+        await db.execute("ALTER TABLE relations ADD COLUMN deprecated_at TEXT DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        await db.execute("ALTER TABLE entities ADD COLUMN is_root INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
+    # 标记已有的根实体
+    for ename in ("AXIS", "Midnight", "AIToolkit"):
+        await db.execute("UPDATE entities SET is_root=1 WHERE name=? AND is_root=0", (ename,))
     # 清理已有重复事实，然后创建唯一索引
     await db.execute("""
         DELETE FROM facts WHERE id NOT IN (
@@ -105,44 +114,6 @@ async def init_db():
         """)
     except Exception:
         pass
-    # 自动创建/修复根实体
-    for c in config_loader.get_centers():
-        if c.get("is_root"):
-            cur = await db.execute("SELECT type FROM entities WHERE name=?", (c["name"],))
-            existing = await cur.fetchone()
-            if existing and existing["type"] != c["type"]:
-                await db.execute("UPDATE entities SET type=?, importance=10, pinned=1 WHERE name=?", (c["type"], c["name"]))
-            else:
-                await db.execute(
-                    "INSERT OR IGNORE INTO entities (name, type, properties, importance, pinned)"
-                    " VALUES (?, ?, '{}', 10, 1)",
-                    (c["name"], c["type"]),
-                )
-
-    # 自动创建根实体间关系
-    for rel in config_loader.get_root_relations():
-        from_type, from_name = rel["from"]
-        to_type, to_name = rel["to"]
-        rel_type = rel["rel_type"]
-        await db.execute(
-            "INSERT OR IGNORE INTO relations (from_type, from_name, to_type, to_name, rel_type, properties)"
-            " VALUES (?, ?, ?, ?, ?, '{}')",
-            (from_type, from_name, to_type, to_name, rel_type),
-        )
-
-    # 自动创建分类实体及与根中心的「包含」关系
-    for cat in config_loader.get_all_categories():
-        cat_name = cat["entity_name"]
-        await db.execute(
-            "INSERT OR IGNORE INTO entities (name, type, properties, importance, pinned)"
-            " VALUES (?, 'category', '{}', 10, 1)",
-            (cat_name,),
-        )
-        await db.execute(
-            "INSERT OR IGNORE INTO relations (from_type, from_name, to_type, to_name, rel_type, properties)"
-            " VALUES (?, ?, 'category', ?, '包含', '{}')",
-            (cat["center_type"], cat["center_name"], cat_name),
-        )
 
     await db.commit()
     await cleanup_expired()
@@ -156,16 +127,11 @@ async def close():
 
 
 async def cleanup_expired():
-    """物理删除 24 小时前软删除的实体和事实。"""
+    """物理删除 24 小时前软删除的实体、事实和关系。"""
     db = await _connect()
     deadline = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
     await db.execute("DELETE FROM entities WHERE deprecated_at IS NOT NULL AND deprecated_at <= ?", (deadline,))
-    await db.execute("""DELETE FROM relations WHERE from_name IN (
-        SELECT name FROM entities WHERE deprecated_at IS NOT NULL AND deprecated_at <= ?
-    )""", (deadline,))
-    await db.execute("""DELETE FROM relations WHERE to_name IN (
-        SELECT name FROM entities WHERE deprecated_at IS NOT NULL AND deprecated_at <= ?
-    )""", (deadline,))
+    await db.execute("DELETE FROM relations WHERE deprecated_at IS NOT NULL AND deprecated_at <= ?", (deadline,))
     await db.execute("DELETE FROM facts WHERE deprecated_at IS NOT NULL AND deprecated_at <= ?", (deadline,))
     await db.commit()

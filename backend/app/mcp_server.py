@@ -1,15 +1,8 @@
 """
 MCP 服务器——将知识图谱暴露为 MCP（Model Context Protocol）工具。
 
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-注意：本模块的工具函数直接调 app.core.memory → SQLite，
-     不经过 app.api.chat 的缓存层，也不经过 app.core.cache。
-     与 REST 端点 /api/graph/tool/* 是独立的访问路径。
-
-     如果外部通过 MCP 写图（save_to_graph/delete_from_graph），
-     项目前端聊天侧 LLM 的 search_memory 缓存不会自动失效。
-     这是设计如此——MCP 与前端聊天走不同路径，互不干扰。
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+所有工具函数直接调用 app.core.memory → SQLite，
+与 REST 端点 /api/graph/tool/* 是独立的访问路径。
 """
 import json
 import logging
@@ -159,23 +152,19 @@ class GraphFact(BaseModel):
 
 
 # ============================================================
-# MCP 工具
-# 注意：所有工具直接调 core/memory，不走缓存。
+# MCP 工具 —— 所有工具直接调 core/memory
 # ============================================================
 
 @mcp.tool(
     name="search_memory",
     description="搜索知识图谱中的长期记忆。返回与查询相关的实体、关系和事实。"
 )
-async def search_memory(query: str, top_k: int = 5) -> str:
-    """
-    MCP 工具入口 —— 搜索图谱记忆。
-    直接调 core/memory，不走 chat.py/缓存层。
-    """
+async def search_memory(query: str, top_k: int = 5) -> list[dict]:
+    """MCP 工具入口 —— 搜索图谱记忆。"""
     try:
         return await mem.search(query, top_k)
     except Exception as e:
-        return f"(无法检索记忆: {e})"
+        return [{"error": f"(无法检索记忆: {e})"}]
 
 
 @mcp.tool(
@@ -193,10 +182,7 @@ async def save_to_graph(
     importance: int | None = Field(default=None, ge=1, le=10, description="重要性（1-10）"),
     pinned: bool | None = Field(default=None, description="是否固定"),
 ) -> str:
-    """
-    MCP 工具入口 —— 保存到图谱。
-    直接调 core/memory，不走 chat.py/缓存层。
-    """
+    """MCP 工具入口 —— 保存到图谱。"""
     try:
         nodes_dict = [n.model_dump() for n in nodes]
         rels_dict = [r.model_dump() for r in relations]
@@ -211,18 +197,18 @@ async def save_to_graph(
 
 @mcp.tool(
     name="list_memory",
-    description="列出知识图谱中的实体或事实，用于浏览内容。"
+    description=(
+        "分层浏览知识图谱。无参数时返回类型概览（如 User (3个)）；"
+        "传入 type 时列出该类型下所有实体标题和子节点数。"
+        "只显示骨架，详细内容用 search_memory 获取。"
+    )
 )
-async def list_memory(mode: str = "keywords", entity_name: str | None = None, depth: int = 2) -> str:
-    """
-    MCP 工具入口 —— 浏览图谱。
-    直接调 core/memory，不走 chat.py/缓存层。
-    mode: "keywords"(列出所有实体名称+类型) | "neighborhood"(查看指定实体的 N 层关联子图)
-    entity_name: neighborhood 模式必填
-    depth: neighborhood 模式展开层数，默认 2，最大 3
-    """
+async def list_memory(
+    type: str | None = Field(default=None, description="实体类型，如 User/AI/Project。不传则返回类型概览"),
+) -> str:
+    """MCP 工具入口 —— 分层浏览图谱。"""
     try:
-        return await mem.list_memory(mode=mode, entity_name=entity_name, depth=depth)
+        return await mem.list_memory(type=type)
     except Exception as e:
         return f"(无法列出记忆: {e})"
 
@@ -242,10 +228,7 @@ async def delete_from_graph(
     target: str = Field(description="目标标识（含义见描述）"),
     rel_type: str | None = Field(default=None, description="仅 relation 类型时可选，精确匹配关系类型"),
 ) -> str:
-    """
-    MCP 工具入口 —— 从图谱删除内容。
-    直接调 core/memory，不走 chat.py/缓存层。
-    """
+    """MCP 工具入口 —— 从图谱删除内容。"""
     try:
         return await mem.delete_memory(target_type, target, rel_type=rel_type)
     except Exception as e:
@@ -267,10 +250,7 @@ async def update_memory(
     target: str = Field(description="目标标识：事实填数字ID，实体填名称"),
     updates: dict = Field(default_factory=dict, description="更新字段字典（按 target_type 不同含义不同）"),
 ) -> str:
-    """
-    MCP 工具入口 —— 更新图谱记忆。
-    直接调 core/memory，不走 chat.py/缓存层。
-    """
+    """MCP 工具入口 —— 更新图谱记忆。"""
     try:
         return await mem.update(target_type, target, updates)
     except Exception as e:
@@ -289,10 +269,7 @@ async def merge_entities(
     source: str = Field(description="源实体名称（将被合并到目标实体后删除）"),
     target: str = Field(description="目标实体名称（接收所有迁移数据）"),
 ) -> str:
-    """
-    MCP 工具入口 —— 合并两个实体。
-    直接调 core/memory，不走 chat.py/缓存层。
-    """
+    """MCP 工具入口 —— 合并两个实体。"""
     try:
         return await mem.merge(source, target)
     except Exception as e:
@@ -312,10 +289,7 @@ async def restore_memory(
     target_type: str = Field(description="恢复类型：entity / fact"),
     target: str = Field(description="目标标识：实体填名称，事实填数字ID"),
 ) -> str:
-    """
-    MCP 工具入口 —— 恢复已软删除的记忆。
-    直接调 core/memory，不走 chat.py/缓存层。
-    """
+    """MCP 工具入口 —— 恢复已软删除的记忆。"""
     try:
         return await mem.restore(target_type, target)
     except Exception as e:

@@ -1,59 +1,10 @@
+# 知识图谱业务编排层：协调搜索、CRUD 操作，返回原始数据
 from . import graph
-from . import config_loader
 
 
-async def search(query: str, top_k: int = 5) -> str:
-    pinned = await graph.get_pinned_entities()
-    keyword_results = await graph.search_entities(query, top_k)
-
-    inj = config_loader.get_injection_config()
-    lines = [inj["header"]] if inj.get("header") else []
-
-    pinned_names = {r["entity"] for r in pinned}
-    if pinned:
-        for row in pinned:
-            _append_entity(lines, row, inj)
-
-    keyword_unique = [r for r in keyword_results if r["entity"] not in pinned_names]
-    if keyword_unique:
-        groups: dict[str, list] = {}
-        unknown = []
-        for row in keyword_unique:
-            crs = row.get("center_relations", [])
-            if not crs:
-                unknown.append(row)
-            else:
-                key = f"{crs[0]['center_type']}|{crs[0]['center_name']}"
-                groups.setdefault(key, []).append(row)
-
-        for c in config_loader.get_centers():
-            key = f"{c['type']}|{c['name']}"
-            if key in groups:
-                lines.append(inj["section_template"].format(icon=c["icon"], label=c["label"]))
-                for row in groups[key]:
-                    _append_entity(lines, row, inj)
-
-        if unknown:
-            lines.append(inj["section_template"].format(
-                icon=inj["unknown_section_icon"],
-                label=inj["unknown_section_label"],
-            ))
-            for row in unknown:
-                _append_entity(lines, row, inj)
-
-    return "\n".join(lines) if len(lines) > 1 else inj["no_result"]
-
-
-def _append_entity(lines: list, row: dict, inj: dict):
-    entity = row["entity"]
-    imp = row.get("importance", 1)
-    is_pinned = row.get("pinned", False)
-    pinned_mark = " [固定]" if is_pinned else ""
-    lines.append(inj["item_template"].format(entity=entity, importance=imp, pinned_mark=pinned_mark))
-    for fact in row.get("facts", []) or []:
-        if fact:
-            lines.append(f"- {fact.get('content', '')}")
-
+async def search(query: str, top_k: int = 5) -> list[dict]:
+    """搜索图谱，返回原始结果列表。"""
+    return await graph.search_entities(query, top_k)
 
 
 async def save(nodes: list[dict], relations: list[dict], facts: list[dict] | None = None, conv_id: str | None = None, importance: int | None = None, pinned: bool | None = None):
@@ -136,59 +87,36 @@ async def delete_memory(target_type: str, target: str, rel_type: str | None = No
         return f"未知的删除目标类型: {target_type}"
 
 
-async def list_memory(mode: str = "keywords", entity_name: str | None = None, depth: int = 2) -> str:
-    """浏览图谱。两种模式：
-    - keywords: 列出所有实体名称+类型（轻量，不带 facts/properties）
-    - neighborhood: 查看指定实体的 N 层关联子图
-    """
-    inj = config_loader.get_injection_config()
+async def list_memory(type: str | None = None) -> str:
+    """分层浏览图谱。无参数→类型概览；传 type→该类型下实体+子节点数。"""
+    if type:
+        return await _list_entities_by_type(type)
+    return await _list_types_overview()
 
-    if mode == "keywords":
-        entities = await graph.list_entity_keywords()
-        if not entities:
-            return inj.get("no_result", "图谱为空")
-        lines = [f"共 {len(entities)} 个实体:"]
-        for e in entities:
-            pin = " [固定]" if e["pinned"] else ""
-            lines.append(f"- [{e['type']}] {e['name']} (重要度:{e['importance']}{pin})")
-        return "\n".join(lines)
 
-    elif mode == "neighborhood":
-        if not entity_name:
-            return "错误：neighborhood 模式需要提供 entity_name"
-        data = await graph.get_entity_neighborhood(entity_name, depth)
-        if data.get("error"):
-            return data["error"]
+async def _list_types_overview() -> str:
+    """类型级概览：只显示类型名+实体数量。"""
+    types = await graph.list_entity_types_summary()
+    if not types:
+        return "图谱为空"
+    total = sum(t["count"] for t in types)
+    lines = [f"图谱概览（{total} 个实体）"]
+    for t in types:
+        lines.append(f"- {t['type']} ({t['count']} 个)")
+    return "\n".join(lines)
 
-        center = data["center"]
-        lines = [f"## {center['name']} [{center['type']}] (重要度:{center['importance']})"]
-        if center.get("pinned"):
-            lines[-1] += " [固定]"
-        if center.get("facts"):
-            for f in center["facts"]:
-                lines.append(f"- 事实: {f['content']}")
 
-        entities_info = data.get("entities", {})
-        for i, layer in enumerate(data.get("layers", []), 1):
-            if not layer:
-                continue
-            lines.append(f"\n### 第 {i} 层关系 ({len(layer)} 条)")
-            for edge in layer:
-                arrow = f"[{edge['from_name']}]-[{edge['rel_type']}]->[{edge['to_name']}]"
-                lines.append(f"- {arrow}")
-
-        # 实体摘要
-        if entities_info:
-            lines.append(f"\n### 涉及实体 ({len(entities_info)} 个)")
-            for name, info in entities_info.items():
-                pin = " [固定]" if info.get("pinned") else ""
-                fc = f", {info.get('facts_count', 0)}条事实" if info.get("facts_count") else ""
-                lines.append(f"- [{info['type']}] {name} (重要度:{info['importance']}{fc}{pin})")
-
-        return "\n".join(lines)
-
-    else:
-        return f"未知的 list_memory 模式: {mode}，支持 keywords / neighborhood"
+async def _list_entities_by_type(entity_type: str) -> str:
+    """列出指定类型下的实体+子节点数。"""
+    entities = await graph.list_entities_by_type(entity_type)
+    if not entities:
+        return f"类型 '{entity_type}' 下没有实体"
+    lines = [f"{entity_type} ({len(entities)} 个)"]
+    for e in entities:
+        pinned_mark = " [固定]" if e["pinned"] else ""
+        child_info = f"（{e['child_count']}个子节点）" if e["child_count"] > 0 else ""
+        lines.append(f"  - {e['name']}{pinned_mark}{child_info}")
+    return "\n".join(lines)
 
 
 async def delete_conversation(conv_id: str):

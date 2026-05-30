@@ -4,9 +4,7 @@
 """
 import json
 import re
-from collections import defaultdict
 
-from . import config_loader
 from .db import _connect
 
 # ── 关键词提取 ──────────────────────────────────────────
@@ -115,41 +113,6 @@ async def search_entities(query: str, top_k: int) -> list[dict]:
     if not scored:
         return []
 
-    top_entities = [(name, etype) for name, etype, *_ in scored[:top_k]]
-
-    placeholders = ','.join('(?,?)' for _ in top_entities)
-    flat_params = [x for pair in top_entities for x in pair]
-    cur = await db.execute(f"""
-        SELECT to_type, to_name, from_type, from_name, rel_type
-        FROM relations
-        WHERE (to_type, to_name) IN ({placeholders})
-    """, flat_params)
-    center_map = defaultdict(list)
-    for row in await cur.fetchall():
-        center_map[(row['to_type'], row['to_name'])].append({
-            "center_type": row['from_type'],
-            "center_name": row['from_name'],
-            "rel_type": row['rel_type'],
-        })
-
-    # 解析分类链：将 category 类型的 from 追溯到其父根中心
-    center_ids = config_loader.get_center_ids()
-    cat_center_map = config_loader.get_category_center_map()
-    for key, rels in center_map.items():
-        resolved = []
-        for rel in rels:
-            ckey = f"{rel['center_type']}|{rel['center_name']}"
-            if ckey in center_ids:
-                resolved.append(rel)
-            elif rel["center_name"] in cat_center_map:
-                cc = cat_center_map[rel["center_name"]]
-                resolved.append({
-                    "center_type": cc["center_type"],
-                    "center_name": cc["center_name"],
-                    "rel_type": rel["rel_type"],
-                })
-        center_map[key] = resolved if resolved else rels
-
     results = []
     for name, etype, props_json, importance, pinned, score in scored[:top_k]:
         entity_facts = []
@@ -160,30 +123,17 @@ async def search_entities(query: str, top_k: int) -> list[dict]:
                     break
 
         cur = await db.execute(
-            "SELECT to_name FROM relations WHERE from_name=?"
-            " UNION SELECT from_name FROM relations WHERE to_name=?"
+            "SELECT to_name FROM relations WHERE from_name=? AND deprecated_at IS NULL"
+            " UNION SELECT from_name FROM relations WHERE to_name=? AND deprecated_at IS NULL"
             " LIMIT 5",
             (name, name),
         )
         related = [r[0] for r in await cur.fetchall()]
 
-        cur = await db.execute(
-            "SELECT c.id, c.title FROM conversations c"
-            " JOIN conversation_mentions cm ON c.id = cm.conv_id"
-            " WHERE cm.entity_name=? LIMIT 3",
-            (name,),
-        )
-        conversations = [
-            {"id": r["id"], "title": r["title"]} for r in await cur.fetchall()
-        ]
-
         results.append({
             "entity": name,
             "type": etype,
-            "center_relations": center_map.get((etype, name), []),
             "facts": entity_facts,
-            "related": related,
-            "conversations": conversations,
             "importance": importance,
             "pinned": bool(pinned),
         })
@@ -194,53 +144,22 @@ async def search_entities(query: str, top_k: int) -> list[dict]:
 async def get_pinned_entities() -> list[dict]:
     """获取所有固定注入的实体及其关联信息"""
     db = await _connect()
-    cur = await db.execute("SELECT name, type, properties, importance, pinned FROM entities WHERE pinned=1 AND deprecated_at IS NULL ORDER BY importance DESC")
+    cur = await db.execute(
+        "SELECT name, type, importance, pinned FROM entities "
+        "WHERE pinned=1 AND deprecated_at IS NULL ORDER BY importance DESC"
+    )
     rows = await cur.fetchall()
 
     if not rows:
         return []
 
-    entity_keys = [(r["type"], r["name"]) for r in rows]
-    placeholders = ','.join('(?,?)' for _ in entity_keys)
-    flat_params = [x for pair in entity_keys for x in pair]
-    cur = await db.execute(f"""
-        SELECT to_type, to_name, from_type, from_name, rel_type
-        FROM relations
-        WHERE (to_type, to_name) IN ({placeholders})
-    """, flat_params)
-    center_map = defaultdict(list)
-    for row in await cur.fetchall():
-        center_map[(row['to_type'], row['to_name'])].append({
-            "center_type": row['from_type'],
-            "center_name": row['from_name'],
-            "rel_type": row['rel_type'],
-        })
-
-    # 解析分类链：将 category 类型的 from 追溯到其父根中心
-    center_ids = config_loader.get_center_ids()
-    cat_center_map = config_loader.get_category_center_map()
-    for key, rels in center_map.items():
-        resolved = []
-        for rel in rels:
-            ckey = f"{rel['center_type']}|{rel['center_name']}"
-            if ckey in center_ids:
-                resolved.append(rel)
-            elif rel["center_name"] in cat_center_map:
-                cc = cat_center_map[rel["center_name"]]
-                resolved.append({
-                    "center_type": cc["center_type"],
-                    "center_name": cc["center_name"],
-                    "rel_type": rel["rel_type"],
-                })
-        center_map[key] = resolved if resolved else rels
-
-    results = []
     # 一次性拉取所有事实
     facts_cur = await db.execute("SELECT content, type, about_entities FROM facts WHERE deprecated_at IS NULL")
     all_facts = [(json.loads(f["about_entities"]), f["content"], f["type"]) for f in await facts_cur.fetchall()]
 
+    results = []
     for row in rows:
-        name, etype, props_json, importance, pinned = row["name"], row["type"], row["properties"], row["importance"], row["pinned"]
+        name, etype, importance, pinned = row["name"], row["type"], row["importance"], row["pinned"]
 
         entity_facts = []
         for about_entities, content, ftype in all_facts:
@@ -249,29 +168,10 @@ async def get_pinned_entities() -> list[dict]:
                 if len(entity_facts) >= 3:
                     break
 
-        cur = await db.execute(
-            "SELECT to_name FROM relations WHERE from_name=?"
-            " UNION SELECT from_name FROM relations WHERE to_name=?"
-            " LIMIT 5",
-            (name, name),
-        )
-        related = [r[0] for r in await cur.fetchall()]
-
-        cur = await db.execute(
-            "SELECT c.id, c.title FROM conversations c"
-            " JOIN conversation_mentions cm ON c.id = cm.conv_id"
-            " WHERE cm.entity_name=? LIMIT 3",
-            (name,),
-        )
-        conversations = [{"id": r["id"], "title": r["title"]} for r in await cur.fetchall()]
-
         results.append({
             "entity": name,
             "type": etype,
-            "center_relations": center_map.get((etype, name), []),
             "facts": entity_facts,
-            "related": related,
-            "conversations": conversations,
             "importance": importance,
             "pinned": bool(pinned),
         })

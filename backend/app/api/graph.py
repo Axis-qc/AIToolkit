@@ -1,8 +1,8 @@
+# 图谱 REST API 端点：提供实体/关系/事实的 CRUD 操作、搜索、工具调用接口
 from typing import Annotated
 
 from fastapi import APIRouter, Body
 
-from app.core import config_loader
 from app.core import memory
 from app.core import graph as graph_core
 from app.core import logger
@@ -24,17 +24,6 @@ async def get_graph():
     return await graph_core.get_all_graph()
 
 
-@router.get("/api/graph/config")
-async def get_graph_config():
-    return {
-        "centers": config_loader.get_centers(),
-        "entity_types": config_loader.get_entity_types(),
-        "default_render": config_loader.get_all_config()["default_render"],
-        "root_node_ids": config_loader.get_root_node_ids(),
-        "injection": config_loader.get_injection_config(),
-    }
-
-
 @router.get("/api/graph/roots")
 async def get_roots():
     return await graph_core.get_roots()
@@ -53,20 +42,6 @@ async def get_facts(type: str, name: str):
 @router.get("/api/graph/orphans")
 async def get_orphans():
     return await graph_core.get_orphans()
-
-
-@router.post("/api/graph/search")
-async def search_graph(query: str = Body(...), top_k: int = Body(5)) -> dict:
-    log = logger.get()
-    log.info("图谱记忆检索请求: query_len=%s top_k=%s", len(query or ""), top_k)
-    summary = await memory.search(query, top_k)
-    no_result = config_loader.get_injection_config()["no_result"]
-    log.info(
-        "图谱记忆检索完成: has_result=%s summary_len=%s",
-        bool(summary and summary != no_result),
-        len(summary or ""),
-    )
-    return {"summary": summary, "has_result": bool(summary and summary != no_result)}
 
 
 # ── 图谱工具端点（直调 core/memory） ──────────────────────
@@ -96,7 +71,7 @@ async def tool_save_to_graph(req: Annotated[SaveToGraphToolRequest, Body()]) -> 
 
 @router.post("/api/graph/tool/list_memory")
 async def tool_list_memory(req: Annotated[ListMemoryToolRequest, Body()]) -> GraphToolResponse:
-    return await _run_tool("list_memory", memory.list_memory, mode=req.mode, entity_name=req.entity_name, depth=req.depth)
+    return await _run_tool("list_memory", memory.list_memory, type=req.type)
 
 
 @router.post("/api/graph/tool/delete_from_graph")
