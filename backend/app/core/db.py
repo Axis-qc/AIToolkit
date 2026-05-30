@@ -38,7 +38,22 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS entities (
             name TEXT PRIMARY KEY,
             type TEXT NOT NULL,
-            properties TEXT DEFAULT '{}'
+            content TEXT DEFAULT '',
+            relations TEXT DEFAULT '[]',
+            properties TEXT DEFAULT '{}',
+            importance INTEGER NOT NULL DEFAULT 1,
+            pinned INTEGER NOT NULL DEFAULT 0,
+            is_root INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT NULL,
+            updated_at TEXT DEFAULT NULL,
+            deprecated_at TEXT DEFAULT NULL
+        );
+        CREATE TABLE IF NOT EXISTS relation_index (
+            entity_name TEXT NOT NULL,
+            target_name TEXT NOT NULL,
+            rel_type TEXT NOT NULL,
+            deprecated_at TEXT DEFAULT NULL,
+            PRIMARY KEY (entity_name, target_name, rel_type)
         );
         CREATE TABLE IF NOT EXISTS relations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,6 +85,17 @@ async def init_db():
             PRIMARY KEY (conv_id, entity_name)
         );
     """)
+    # ── 旧字段兼容（已有数据库升级） ──
+    for col in ("content", "relations"):
+        try:
+            await db.execute(f"ALTER TABLE entities ADD COLUMN {col} TEXT DEFAULT ''")
+        except Exception:
+            pass
+    for col in ("created_at", "updated_at"):
+        try:
+            await db.execute(f"ALTER TABLE entities ADD COLUMN {col} TEXT DEFAULT NULL")
+        except Exception:
+            pass
     try:
         await db.execute("ALTER TABLE relations ADD COLUMN to_type TEXT NOT NULL DEFAULT ''")
     except Exception:
@@ -98,9 +124,18 @@ async def init_db():
         await db.execute("ALTER TABLE entities ADD COLUMN is_root INTEGER NOT NULL DEFAULT 0")
     except Exception:
         pass
-    # 标记已有的根实体
-    for ename in ("AXIS", "Midnight", "AIToolkit"):
-        await db.execute("UPDATE entities SET is_root=1 WHERE name=? AND is_root=0", (ename,))
+    try:
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ri_target ON relation_index(target_name)
+        """)
+    except Exception:
+        pass
+    try:
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ri_dep ON relation_index(deprecated_at)
+        """)
+    except Exception:
+        pass
     # 清理已有重复事实，然后创建唯一索引
     await db.execute("""
         DELETE FROM facts WHERE id NOT IN (
@@ -127,11 +162,12 @@ async def close():
 
 
 async def cleanup_expired():
-    """物理删除 24 小时前软删除的实体、事实和关系。"""
+    """物理删除 24 小时前软删除的实体、关系索引、关系和事实。"""
     db = await _connect()
     deadline = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
     await db.execute("DELETE FROM entities WHERE deprecated_at IS NOT NULL AND deprecated_at <= ?", (deadline,))
+    await db.execute("DELETE FROM relation_index WHERE deprecated_at IS NOT NULL AND deprecated_at <= ?", (deadline,))
     await db.execute("DELETE FROM relations WHERE deprecated_at IS NOT NULL AND deprecated_at <= ?", (deadline,))
     await db.execute("DELETE FROM facts WHERE deprecated_at IS NOT NULL AND deprecated_at <= ?", (deadline,))
     await db.commit()

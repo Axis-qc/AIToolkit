@@ -1,23 +1,18 @@
-# FastAPI 应用入口：CORS 中间件、lifespan 生命周期管理、静态文件挂载、路由注册
+# FastAPI 应用入口：CORS 中间件、lifespan 生命周期管理、MCP 端点
 from contextlib import asynccontextmanager
-from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-
 from app.core import graph
 from app.core import logger
+from app import mcp_server
 from app.api.graph import router as graph_router
-from app import mcp_server  # MCP SSE 端点
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.init()
     await graph.init_db()
-
     yield
-
     await graph.close()
     logger.close()
 
@@ -32,31 +27,82 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 图谱 REST 端点
 app.include_router(graph_router)
 
-static_dir = Path(__file__).resolve().parent / "static"
-static_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-
 # ── MCP SSE 端点 ──────────────────────────────────────
-# 暴露知识图谱工具供外部 MCP 客户端（Reasonix、Claude Desktop 等）调用。
-# 所有工具直接调 core/memory → SQLite
-# 客户端连接地址：http://127.0.0.1:18000/mcp/sse
-# ───────────────────────────────────────────────────────
 app.mount("/mcp", mcp_server.mcp.sse_app())
 
-# ── MCP 直通端点（无状态单次处理） ──────────────────
-# 绕过 SSE 长连接限制，每次请求独立创建 MCP session
-from starlette.routing import Route
-from app.mcp_server import mcp_oneshot_app
-app.add_route("/mcp/direct", route=mcp_oneshot_app, methods=["POST"])
+# ── MCP 直通端点 ──────────────────────────────────────
+from starlette.responses import JSONResponse
+import json as json_mod
+from mcp.server.models import InitializationOptions
+from mcp.server.session import ServerSession
+from mcp.types import JSONRPCMessage
+from mcp.shared.message import SessionMessage, ServerMessageMetadata
+import anyio
 
 
-@app.get("/graph")
-async def graph_view():
-    from fastapi.responses import HTMLResponse
-    html_path = static_dir / "graph.html"
-    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+@app.post("/mcp-direct")
+async def mcp_direct(request: Request):
+    """直接处理 MCP 请求，不依赖 SSE 长连接。"""
+    body = await request.body()
+    if not body:
+        return Response("Empty body", status_code=400)
+
+    try:
+        jmsg = JSONRPCMessage.model_validate_json(body)
+    except Exception as e:
+        return Response(f"Invalid MCP message: {e}", status_code=400)
+
+    mcp_srv = mcp_server.mcp._mcp_server
+    init_opts = mcp_srv.create_initialization_options()
+    result_json = None
+
+    async def run_session():
+        nonlocal result_json
+        read_writer, read_reader = anyio.create_memory_object_stream(1)
+        write_writer, write_reader = anyio.create_memory_object_stream(1)
+
+        from contextlib import AsyncExitStack
+        async with AsyncExitStack() as stack:
+            lifespan_ctx = await stack.enter_async_context(mcp_srv.lifespan(mcp_srv))
+            session = await stack.enter_async_context(
+                ServerSession(read_reader, write_writer, init_opts, stateless=True)
+            )
+
+            session_msg = SessionMessage(jmsg, metadata=ServerMessageMetadata())
+            await read_writer.send(session_msg)
+            read_writer.close()
+
+            async for msg in session.incoming_messages:
+                await mcp_srv._handle_message(msg, session, lifespan_ctx, raise_exceptions=False)
+
+            write_writer.close()
+            responses = []
+            try:
+                async for resp in write_reader:
+                    responses.append(resp)
+            except anyio.EndOfStream:
+                pass
+
+            if responses:
+                last = responses[-1]
+                if hasattr(last, 'message') and hasattr(last.message, 'root'):
+                    result_json = last.message.root.model_dump_json(
+                        by_alias=True, exclude_none=True
+                    )
+
+    try:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run_session)
+
+        if result_json:
+            return Response(content=result_json, status_code=200, media_type="application/json")
+        return Response("No response", status_code=500)
+
+    except Exception as e:
+        return Response(f"Internal error: {e}", status_code=500)
 
 
 @app.get("/api/health")

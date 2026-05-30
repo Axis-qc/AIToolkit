@@ -128,7 +128,12 @@ const selectedRow = computed(() => flatRows.value.find(r => r.key === selectedId
 
 const selectedFacts = computed(() => {
   if (!selectedId.value) return []
-  return nodeFactsCache.value.get(selectedId.value) || []
+  return nodeFactsCache.value.get(selectedId.value)?.facts || []
+})
+
+const selectedEntity = computed(() => {
+  if (!selectedId.value) return null
+  return nodeFactsCache.value.get(selectedId.value)?.entity || null
 })
 
 function selectRow(row: FlatRow) {
@@ -144,9 +149,9 @@ async function loadFacts(node: TreeNode) {
   if (nodeFactsCache.value.has(node.key)) return
   try {
     const res = await fetchFacts(node.type, node.name)
-    nodeFactsCache.value.set(node.key, res.facts)
+    nodeFactsCache.value.set(node.key, { facts: res.facts, entity: res.entity || null })
   } catch {
-    nodeFactsCache.value.set(node.key, [])
+    nodeFactsCache.value.set(node.key, { facts: [], entity: null })
   }
 }
 
@@ -400,6 +405,13 @@ function collapseRecursive(node: TreeNode) {
 
         <div class="panel-divider" />
 
+        <!-- 实体描述 -->
+        <div v-if="selectedEntity?.content" class="panel-section">
+          <div class="panel-section-title">描述</div>
+          <div class="panel-desc">{{ selectedEntity.content }}</div>
+        </div>
+
+        <!-- 关联事实 -->
         <div v-if="selectedFacts.length > 0" class="panel-section">
           <div class="panel-section-title">关联事实</div>
           <div v-for="(f, i) in selectedFacts" :key="i" class="panel-fact">
@@ -411,7 +423,7 @@ function collapseRecursive(node: TreeNode) {
           </div>
         </div>
 
-        <div v-if="selectedFacts.length === 0" class="panel-empty">
+        <div v-if="!selectedEntity?.content && selectedFacts.length === 0" class="panel-empty">
           <span>暂无关联信息</span>
         </div>
       </aside>
@@ -611,6 +623,17 @@ function collapseRecursive(node: TreeNode) {
 .fact-body { flex: 1; padding: 0.5rem 0.6rem; display: flex; flex-direction: column; gap: 0.35rem; }
 .fact-type-tag { font-size: 0.62rem; font-weight: 600; flex-shrink: 0; padding: 0.08rem 0.35rem; border-radius: 4px; }
 .fact-content { flex: 1; }
+.panel-desc {
+  font-size: 0.8rem;
+  color: #9a9ab0;
+  line-height: 1.6;
+  padding: 0.5rem 0.75rem;
+  background: rgba(255,255,255,0.02);
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.04);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .panel-empty { display: flex; flex-direction: column; align-items: center; gap: 0.75rem; color: #3a3a4e; font-size: 0.78rem; text-align: center; padding: 3rem 0; }
 .detail-panel::-webkit-scrollbar { width: 3px; }
 .detail-panel::-webkit-scrollbar-track { background: transparent; }
