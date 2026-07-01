@@ -135,7 +135,7 @@ async function renderGraph() {
       .call(
         d3.drag<SVGGElement, SimNode>()
           .on('start', (event, d) => {
-            if (!event.active && simulation) simulation.alphaTarget(0.3).restart()
+            if (!event.active && simulation) simulation.alphaTarget(0.05).restart()
             d.fx = d.x
             d.fy = d.y
           })
@@ -145,8 +145,8 @@ async function renderGraph() {
           })
           .on('end', (event, d) => {
             if (!event.active && simulation) simulation.alphaTarget(0)
-            d.fx = null
-            d.fy = null
+            d.fx = d.x
+            d.fy = d.y
           }) as any
       )
 
