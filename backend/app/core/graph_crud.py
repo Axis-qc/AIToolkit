@@ -148,8 +148,8 @@ async def update_entity(
     )
     await db.commit()
 
-    # 如果 relations 变了，刷新索引
-    if new_relations is not None:
+    # 如果 relations 或 is_root 变了，刷新索引
+    if new_relations is not None or new_is_root is not None:
         await refresh_relation_index(name)
     return True
 
@@ -226,16 +226,20 @@ async def refresh_relation_index(entity_name: str):
         "DELETE FROM relation_index WHERE entity_name=?",
         (entity_name,),
     )
-    # 2. 读当前 relations JSON
+    # 2. 读当前 relations JSON + is_root
     cur = await db.execute(
-        "SELECT relations FROM entities WHERE name=?",
+        "SELECT relations, is_root FROM entities WHERE name=?",
         (entity_name,),
     )
     row = await cur.fetchone()
     if not row:
         await db.commit()
         return
-    # 3. 插入新索引
+    # 3. 根节点不能有出边，跳过
+    if row["is_root"]:
+        await db.commit()
+        return
+    # 4. 插入新索引
     relations_list = json.loads(row["relations"] or "[]")
     for rel in relations_list:
         await db.execute(
@@ -403,6 +407,12 @@ async def set_root(entity_name: str, is_root: bool):
         "UPDATE entities SET is_root = ? WHERE name = ?",
         (1 if is_root else 0, entity_name),
     )
+    if is_root:
+        # 根节点不能有出边，删除所有它指向别人的关系索引
+        await db.execute(
+            "DELETE FROM relation_index WHERE entity_name=?",
+            (entity_name,),
+        )
     await db.commit()
 
 

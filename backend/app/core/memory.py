@@ -32,6 +32,8 @@ async def save(
         node_is_root = node.get("is_root", is_root)
         effective_root = bool(node_is_root) if node_is_root is not None else False
         await graph.upsert_entity(name, ntype, content=content, relations=rels, props=props, is_root=effective_root)
+        if effective_root:
+            await graph.set_root(name, True)
         await graph.bump_importance(name)
         if importance is not None:
             await graph.set_importance(name, importance)

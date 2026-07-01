@@ -134,7 +134,7 @@ async def get_orphans() -> dict:
     cur = await db.execute("""
         SELECT e.name, e.type, e.importance, e.pinned
         FROM entities e
-        WHERE e.deprecated_at IS NULL
+        WHERE e.deprecated_at IS NULL AND e.is_root=0
           AND NOT EXISTS (
               SELECT 1 FROM relation_index ri
               WHERE ri.deprecated_at IS NULL
