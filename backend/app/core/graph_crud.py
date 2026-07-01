@@ -11,36 +11,152 @@ from .db import _connect, cleanup_expired
 # ── 实体 CRUD ───────────────────────────────────────────
 
 
-async def upsert_entity(name: str, etype: str, props: dict):
+async def upsert_entity(
+    name: str, etype: str,
+    content: str = "",
+    relations: list | None = None,
+    props: dict | None = None,
+    is_root: bool = False,
+):
+    """创建或更新实体。支持 content/relations 新字段，自动维护关系索引。"""
     db = await _connect()
-    await db.execute(
-        "INSERT INTO entities (name, type, properties) VALUES (?, ?, ?)"
-        " ON CONFLICT(name) DO UPDATE SET type=excluded.type, properties=excluded.properties",
-        (name, etype, json.dumps(props)),
-    )
+    now = datetime.now(timezone.utc).strftime("%Y:%m:%d:%H:%M:%S")
+    relations_json = json.dumps(relations or [], ensure_ascii=False)
+    props_json = json.dumps(props or {}, ensure_ascii=False)
+
+    # 检查是否存在——决定 created_at
+    cur = await db.execute("SELECT name FROM entities WHERE name=?", (name,))
+    exists = await cur.fetchone() is not None
+
+    if exists:
+        await db.execute(
+            "UPDATE entities SET type=?, content=?, relations=?, properties=?, is_root=?, updated_at=? WHERE name=?",
+            (etype, content, relations_json, props_json, int(is_root), now, name),
+        )
+    else:
+        await db.execute(
+            "INSERT INTO entities (name, type, content, relations, properties, is_root, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, etype, content, relations_json, props_json, int(is_root), now, now),
+        )
     await db.commit()
 
+    # 自动维护关系索引
+    await refresh_relation_index(name)
 
-async def update_entity(name: str, new_type: str | None = None, new_props: dict | None = None) -> bool:
-    """更新实体类型和/或属性。返回是否找到并更新。"""
+
+async def update_entity(
+    name: str,
+    new_name: str | None = None,
+    new_type: str | None = None,
+    new_props: dict | None = None,
+    new_content: str | None = None,
+    new_relations: list | None = None,
+    new_is_root: bool | None = None,
+) -> bool:
+    """更新实体字段。传 None 的字段保留原值。支持重命名（new_name）。
+    重命名时自动更新 relation_index / facts.about_entities / conversation_mentions。
+    返回是否找到并更新。"""
     db = await _connect()
     cur = await db.execute("SELECT * FROM entities WHERE name=?", (name,))
     row = await cur.fetchone()
     if not row:
         return False
+
+    now = datetime.now(timezone.utc).strftime("%Y:%m:%d:%H:%M:%S")
+    effective_name = new_name if new_name is not None else name
     etype = new_type if new_type is not None else row["type"]
+    content = new_content if new_content is not None else row["content"]
     props = json.dumps(new_props) if new_props is not None else row["properties"]
+    relations_json = (
+        json.dumps(new_relations, ensure_ascii=False)
+        if new_relations is not None
+        else row["relations"]
+    )
+
+    # ── 重命名：更新主键 + 所有关联引用 ──
+    if new_name is not None and new_name != name:
+        # 目标名称已被占用则报错
+        check = await (await db.execute(
+            "SELECT name FROM entities WHERE name=? AND deprecated_at IS NULL", (new_name,)
+        )).fetchone()
+        if check:
+            raise ValueError(f"目标名称「{new_name}」已被其他实体占用")
+
+        # 1. 主表改名（INSERT 新行 + DELETE 旧行，因为 PRIMARY KEY 不可 UPDATE）
+        rename_is_root = int(new_is_root) if new_is_root is not None else None
+        if rename_is_root is not None:
+            await db.execute(
+                "INSERT INTO entities (name, type, content, relations, properties, "
+                "importance, pinned, is_root, created_at, updated_at, deprecated_at) "
+                "SELECT ?, type, content, relations, properties, "
+                "importance, pinned, ?, created_at, ?, deprecated_at "
+                "FROM entities WHERE name=?",
+                (new_name, rename_is_root, now, name),
+            )
+        else:
+            await db.execute(
+                "INSERT INTO entities (name, type, content, relations, properties, "
+                "importance, pinned, is_root, created_at, updated_at, deprecated_at) "
+                "SELECT ?, type, content, relations, properties, "
+                "importance, pinned, is_root, created_at, ?, deprecated_at "
+                "FROM entities WHERE name=?",
+                (new_name, now, name),
+            )
+        await db.execute("DELETE FROM entities WHERE name=?", (name,))
+
+        # 2. relation_index：出边 entity_name
+        await db.execute(
+            "UPDATE relation_index SET entity_name=? WHERE entity_name=?",
+            (new_name, name),
+        )
+        # 3. relation_index：入边 target_name
+        await db.execute(
+            "UPDATE relation_index SET target_name=? WHERE target_name=?",
+            (new_name, name),
+        )
+        # 4. facts.about_entities JSON 替换
+        cur_facts = await db.execute(
+            "SELECT id, about_entities FROM facts WHERE deprecated_at IS NULL"
+        )
+        for frow in await cur_facts.fetchall():
+            about = json.loads(frow["about_entities"])
+            if name in about:
+                new_about = json.dumps(list(set(
+                    new_name if x == name else x for x in about
+                )), ensure_ascii=False)
+                await db.execute(
+                    "UPDATE facts SET about_entities=? WHERE id=?",
+                    (new_about, frow["id"]),
+                )
+        # 5. conversation_mentions
+        await db.execute(
+            "UPDATE conversation_mentions SET entity_name=? WHERE entity_name=?",
+            (new_name, name),
+        )
+        await db.commit()
+
+        # 改名后索引重建用新名称
+        await refresh_relation_index(new_name)
+        return True
+
+    # ── 普通更新（不改名）──
+    is_root = int(new_is_root) if new_is_root is not None else row["is_root"]
     await db.execute(
-        "UPDATE entities SET type=?, properties=? WHERE name=?",
-        (etype, props, name),
+        "UPDATE entities SET type=?, content=?, relations=?, properties=?, is_root=?, updated_at=? WHERE name=?",
+        (etype, content, relations_json, props, is_root, now, name),
     )
     await db.commit()
+
+    # 如果 relations 变了，刷新索引
+    if new_relations is not None:
+        await refresh_relation_index(name)
     return True
 
 
 async def delete_entity(name: str) -> bool:
     """
-    ⛔ 硬删除已禁用！请使用 soft_delete_entity（软删除，可恢复）替代。
+    硬删除已禁用！请使用 soft_delete_entity（软删除，可恢复）替代。
     """
     raise RuntimeError(
         f"硬删除已禁用：delete_entity('{name}') 会级联删除关联事实。"
@@ -70,16 +186,16 @@ async def list_entity_types_summary() -> list[dict]:
 
 
 async def list_entities_by_type(entity_type: str, limit: int = 50) -> list[dict]:
-    """按类型列出实体+子节点数（关系邻居数）。"""
+    """按类型列出实体+关系邻居数。"""
     db = await _connect()
     cur = await db.execute(
         """
         SELECT e.name, e.type, e.importance, e.pinned,
-               COUNT(DISTINCT CASE WHEN r.from_name = e.name THEN r.to_name ELSE r.from_name END) AS child_count
+               COUNT(DISTINCT ri.entity_name || ri.target_name) AS child_count
         FROM entities e
-        LEFT JOIN relations r
-            ON r.deprecated_at IS NULL
-            AND (r.from_name = e.name OR r.to_name = e.name)
+        LEFT JOIN relation_index ri
+            ON ri.deprecated_at IS NULL
+            AND (ri.entity_name = e.name OR ri.target_name = e.name)
         WHERE e.deprecated_at IS NULL AND e.type = ?
         GROUP BY e.name
         ORDER BY e.importance DESC, e.name
@@ -99,37 +215,49 @@ async def list_entities_by_type(entity_type: str, limit: int = 50) -> list[dict]
     ]
 
 
-# ── 关系 CRUD ───────────────────────────────────────────
+# ── 关系索引维护 ──────────────────────────────────────
 
 
-async def upsert_relation(
-    from_type: str, from_name: str, to_type: str, to_name: str, rel_type: str, props: dict
-):
+async def refresh_relation_index(entity_name: str):
+    """增量更新——删掉该实体的旧出边，根据 entities.relations JSON 重建。"""
     db = await _connect()
+    # 1. 删旧出边
     await db.execute(
-        "INSERT OR REPLACE INTO relations (from_type, from_name, to_type, to_name, rel_type, properties)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (from_type, from_name, to_type, to_name, rel_type, json.dumps(props)),
+        "DELETE FROM relation_index WHERE entity_name=?",
+        (entity_name,),
     )
+    # 2. 读当前 relations JSON
+    cur = await db.execute(
+        "SELECT relations FROM entities WHERE name=?",
+        (entity_name,),
+    )
+    row = await cur.fetchone()
+    if not row:
+        await db.commit()
+        return
+    # 3. 插入新索引
+    relations_list = json.loads(row["relations"] or "[]")
+    for rel in relations_list:
+        await db.execute(
+            "INSERT OR IGNORE INTO relation_index "
+            "(entity_name, target_name, rel_type, deprecated_at) "
+            "VALUES (?, ?, ?, NULL)",
+            (entity_name, rel["name"], rel.get("rel", "")),
+        )
     await db.commit()
 
 
-async def delete_relation(from_name: str, to_name: str, rel_type: str | None = None) -> int:
-    """软删除匹配的关系（标记 deprecated_at）。返回删除行数。"""
+async def rebuild_relation_index():
+    """全量重建——遍历所有活跃实体，逐条重建出边索引。"""
     db = await _connect()
-    now = datetime.now(timezone.utc).isoformat()
-    if rel_type:
-        cur = await db.execute(
-            "UPDATE relations SET deprecated_at=? WHERE from_name=? AND to_name=? AND rel_type=? AND deprecated_at IS NULL",
-            (now, from_name, to_name, rel_type),
-        )
-    else:
-        cur = await db.execute(
-            "UPDATE relations SET deprecated_at=? WHERE from_name=? AND to_name=? AND deprecated_at IS NULL",
-            (now, from_name, to_name),
-        )
+    await db.execute("DELETE FROM relation_index")
+    cur = await db.execute(
+        "SELECT name FROM entities WHERE deprecated_at IS NULL"
+    )
+    names = [r["name"] for r in await cur.fetchall()]
     await db.commit()
-    return cur.rowcount
+    for name in names:
+        await refresh_relation_index(name)
 
 
 # ── 事实 CRUD ───────────────────────────────────────────
@@ -144,7 +272,7 @@ async def create_fact(content: str, ftype: str, about_entities: list[str]):
     )
     if await cur.fetchone():
         return  # 已存在，跳过
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(timezone.utc).strftime("%Y:%m:%d:%H:%M:%S")
     await db.execute(
         "INSERT INTO facts (content, type, about_entities, ts) VALUES (?, ?, ?, ?)",
         (content, ftype, about_json, ts),
@@ -203,7 +331,7 @@ async def search_facts_by_keyword(keyword: str, limit: int = 500) -> list[dict]:
 
 async def delete_fact(fact_id: int) -> bool:
     """
-    ⛔ 硬删除已禁用！请使用 soft_delete_fact（软删除，可恢复）替代。
+    硬删除已禁用！请使用 soft_delete_fact（软删除，可恢复）替代。
     """
     raise RuntimeError(
         f"硬删除已禁用：delete_fact({fact_id}) 不可恢复。"
@@ -216,7 +344,7 @@ async def delete_fact(fact_id: int) -> bool:
 
 async def index_conversation(conv_id: str, file_path: str, title: str):
     db = await _connect()
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).strftime("%Y:%m:%d:%H:%M:%S")
     await db.execute(
         "INSERT OR REPLACE INTO conversations (id, file_path, title, created_at, archived)"
         " VALUES (?, ?, ?, ?, 0)",
@@ -269,6 +397,15 @@ async def set_pinned(entity_name: str, pinned: bool):
     await db.commit()
 
 
+async def set_root(entity_name: str, is_root: bool):
+    db = await _connect()
+    await db.execute(
+        "UPDATE entities SET is_root = ? WHERE name = ?",
+        (1 if is_root else 0, entity_name),
+    )
+    await db.commit()
+
+
 async def set_importance(entity_name: str, importance: int):
     db = await _connect()
     await db.execute(
@@ -282,17 +419,22 @@ async def set_importance(entity_name: str, importance: int):
 
 
 async def soft_delete_entity(name: str) -> bool:
-    """软删除实体：标记 deprecated_at=now，同时软删其所有关系。返回是否找到。"""
+    """软删除实体：标记 deprecated_at=now，出边直接删，入边标记失效。返回是否找到。"""
     db = await _connect()
     cur = await db.execute("SELECT name FROM entities WHERE name=? AND deprecated_at IS NULL", (name,))
     if not await cur.fetchone():
         return False
-    now = datetime.now(timezone.utc).isoformat()
-    await db.execute("UPDATE entities SET deprecated_at=? WHERE name=?", (now, name))
+    now = datetime.now(timezone.utc).strftime("%Y:%m:%d:%H:%M:%S")
+    # 1. 标记实体已删
+    await db.execute("UPDATE entities SET deprecated_at=?, updated_at=? WHERE name=?", (now, now, name))
+    # 2. 出边：直接删除（我的声明，我没了就作废）
+    await db.execute("DELETE FROM relation_index WHERE entity_name=?", (name,))
+    # 3. 入边：标记失效（别人的声明，目标没了）
     await db.execute(
-        "UPDATE relations SET deprecated_at=? WHERE (from_name=? OR to_name=?) AND deprecated_at IS NULL",
-        (now, name, name),
+        "UPDATE relation_index SET deprecated_at=? WHERE target_name=? AND deprecated_at IS NULL",
+        (now, name),
     )
+    # 4. 清理对话索引中的提及记录
     await db.execute("DELETE FROM conversation_mentions WHERE entity_name=?", (name,))
     await db.commit()
     await cleanup_expired()
@@ -305,7 +447,7 @@ async def soft_delete_fact(fact_id: int) -> bool:
     cur = await db.execute("SELECT id FROM facts WHERE id=? AND deprecated_at IS NULL", (fact_id,))
     if not await cur.fetchone():
         return False
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).strftime("%Y:%m:%d:%H:%M:%S")
     await db.execute("UPDATE facts SET deprecated_at=? WHERE id=?", (now, fact_id))
     await db.commit()
     await cleanup_expired()
@@ -313,15 +455,21 @@ async def soft_delete_fact(fact_id: int) -> bool:
 
 
 async def restore_entity(name: str) -> bool:
-    """恢复软删除的实体：清除 deprecated_at 标记，同时恢复其所有软删除的关系。"""
+    """恢复软删除的实体：清除 deprecated_at，重建出边索引，恢复入边。返回是否找到。"""
     db = await _connect()
     cur = await db.execute("SELECT name FROM entities WHERE name=? AND deprecated_at IS NOT NULL", (name,))
     if not await cur.fetchone():
         return False
-    await db.execute("UPDATE entities SET deprecated_at=NULL WHERE name=?", (name,))
+    await db.execute("UPDATE entities SET deprecated_at=NULL, updated_at=? WHERE name=?",
+                     (datetime.now(timezone.utc).strftime("%Y:%m:%d:%H:%M:%S"), name))
+    await db.commit()
+    # 出边：从 relations JSON 重建
+    await refresh_relation_index(name)
+    # 入边：重新生效
+    db = await _connect()
     await db.execute(
-        "UPDATE relations SET deprecated_at=NULL WHERE deprecated_at IS NOT NULL AND (from_name=? OR to_name=?)",
-        (name, name),
+        "UPDATE relation_index SET deprecated_at=NULL WHERE target_name=? AND deprecated_at IS NOT NULL",
+        (name,),
     )
     await db.commit()
     return True
@@ -339,31 +487,69 @@ async def restore_fact(fact_id: int) -> bool:
 
 
 async def list_deprecated() -> list[dict]:
-    """列出所有已软删除待清理的实体、事实和关系。"""
+    """列出所有已软删除待清理的实体、关系索引和事实。"""
     db = await _connect()
     cur = await db.execute(
-        "SELECT name, type, properties, importance, deprecated_at FROM entities WHERE deprecated_at IS NOT NULL ORDER BY deprecated_at DESC"
+        "SELECT name, type, deprecated_at FROM entities WHERE deprecated_at IS NOT NULL ORDER BY deprecated_at DESC"
     )
     entities = [{"name": r["name"], "type": r["type"], "deprecated_at": r["deprecated_at"]} for r in await cur.fetchall()]
     cur = await db.execute(
-        "SELECT id, content, type, about_entities, deprecated_at FROM facts WHERE deprecated_at IS NOT NULL ORDER BY deprecated_at DESC"
+        "SELECT id, content, type, deprecated_at FROM facts WHERE deprecated_at IS NOT NULL ORDER BY deprecated_at DESC"
     )
     facts = [{"id": r["id"], "content": r["content"][:80], "type": r["type"], "deprecated_at": r["deprecated_at"]} for r in await cur.fetchall()]
     cur = await db.execute(
-        "SELECT id, from_type, from_name, to_type, to_name, rel_type, deprecated_at FROM relations WHERE deprecated_at IS NOT NULL ORDER BY deprecated_at DESC"
+        "SELECT DISTINCT entity_name, target_name, rel_type, deprecated_at FROM relation_index WHERE deprecated_at IS NOT NULL ORDER BY deprecated_at DESC"
     )
-    relations = [
-        {"id": r["id"], "from": f"{r['from_type']}|{r['from_name']}", "to": f"{r['to_type']}|{r['to_name']}", "rel_type": r["rel_type"], "deprecated_at": r["deprecated_at"]}
+    relations_idx = [
+        {"from": r["entity_name"], "to": r["target_name"], "rel_type": r["rel_type"], "deprecated_at": r["deprecated_at"]}
         for r in await cur.fetchall()
     ]
-    return {"entities": entities, "facts": facts, "relations": relations}
+    return {"entities": entities, "facts": facts, "relation_index": relations_idx}
+
+
+# ── 数据迁移（旧 relations → entities.relations） ──────
+
+
+async def migrate_from_old_schema():
+    """将旧 relations 表数据合并到 entities.relations JSON 中。幂等，可重复运行。"""
+    db = await _connect()
+    cur = await db.execute(
+        "SELECT from_name, to_name, rel_type FROM relations WHERE deprecated_at IS NULL"
+    )
+    rows = await cur.fetchall()
+    migrated = 0
+    for row in rows:
+        from_name, to_name, rel_type = row["from_name"], row["to_name"], row["rel_type"]
+        # 读当前 relations JSON
+        cur2 = await db.execute(
+            "SELECT relations FROM entities WHERE name=? AND deprecated_at IS NULL",
+            (from_name,),
+        )
+        ent = await cur2.fetchone()
+        if not ent:
+            continue
+        rels = json.loads(ent["relations"] or "[]")
+        # 检查是否已存在（幂等）
+        if any(r["name"] == to_name and r.get("rel", "") == rel_type for r in rels):
+            continue
+        rels.append({"name": to_name, "rel": rel_type})
+        await db.execute(
+            "UPDATE entities SET relations=? WHERE name=?",
+            (json.dumps(rels, ensure_ascii=False), from_name),
+        )
+        migrated += 1
+    await db.commit()
+    # 全量重建索引
+    if migrated:
+        await rebuild_relation_index()
+    return f"迁移完成：处理 {migrated} 条旧关系"
 
 
 # ── 合并 ────────────────────────────────────────────────
 
 
 async def merge_entities(source: str, target: str) -> str:
-    """将源实体合并到目标实体：迁移关系+事实+属性，然后软删除源实体。"""
+    """将源实体合并到目标实体：合并 relations JSON + 事实 + 属性，然后软删除源实体。"""
     if source == target:
         return "源实体和目标实体相同，无需合并"
 
@@ -381,36 +567,24 @@ async def merge_entities(source: str, target: str) -> str:
     if not tgt:
         return f"未找到目标实体「{target}」"
 
-    stats = {"relations_out": 0, "relations_in": 0, "facts": 0, "props": 0}
+    stats: dict[str, int] = {"facts": 0, "props": 0}
 
-    # 1. 迁移出边
-    for edge in await (await db.execute(
-        "SELECT from_type, to_type, to_name, rel_type, properties FROM relations WHERE from_name=? AND deprecated_at IS NULL",
-        (source,),
-    )).fetchall():
-        await db.execute(
-            "INSERT OR IGNORE INTO relations (from_type, from_name, to_type, to_name, rel_type, properties)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (edge["from_type"], target, edge["to_type"], edge["to_name"], edge["rel_type"], edge["properties"]),
-        )
-        stats["relations_out"] += 1
+    # 1. 合并 relations JSON
+    src_rels = json.loads(src["relations"] or "[]")
+    tgt_rels = json.loads(tgt["relations"] or "[]")
+    existing_pairs = {(r["name"], r.get("rel", "")) for r in tgt_rels}
+    for r in src_rels:
+        pair = (r["name"], r.get("rel", ""))
+        if pair not in existing_pairs:
+            tgt_rels.append(r)
+            existing_pairs.add(pair)
+    await db.execute(
+        "UPDATE entities SET relations=? WHERE name=?",
+        (json.dumps(tgt_rels, ensure_ascii=False), target),
+    )
+    await refresh_relation_index(target)
 
-    # 2. 迁移入边
-    for edge in await (await db.execute(
-        "SELECT from_type, from_name, to_type, rel_type, properties FROM relations WHERE to_name=? AND deprecated_at IS NULL",
-        (source,),
-    )).fetchall():
-        await db.execute(
-            "INSERT OR IGNORE INTO relations (from_type, from_name, to_type, to_name, rel_type, properties)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (edge["from_type"], edge["from_name"], edge["to_type"], target, edge["rel_type"], edge["properties"]),
-        )
-        stats["relations_in"] += 1
-
-    # 3. 清除 source 的旧关系
-    await db.execute("DELETE FROM relations WHERE from_name=? OR to_name=?", (source, source))
-
-    # 4. 迁移事实
+    # 2. 迁移事实
     for row in await (await db.execute(
         "SELECT id, about_entities FROM facts WHERE deprecated_at IS NULL"
     )).fetchall():
@@ -422,7 +596,7 @@ async def merge_entities(source: str, target: str) -> str:
             await db.execute("UPDATE facts SET about_entities=? WHERE id=?", (new_about, row["id"]))
             stats["facts"] += 1
 
-    # 5. 合并属性
+    # 3. 合并属性
     src_props = json.loads(src["properties"])
     tgt_props = json.loads(tgt["properties"])
     merged = {**tgt_props}
@@ -431,9 +605,12 @@ async def merge_entities(source: str, target: str) -> str:
             merged[k] = v
             stats["props"] += 1
     if stats["props"] > 0:
-        await db.execute("UPDATE entities SET properties=? WHERE name=?", (json.dumps(merged), target))
+        await db.execute(
+            "UPDATE entities SET properties=? WHERE name=?",
+            (json.dumps(merged, ensure_ascii=False), target),
+        )
 
-    # 6. 重要度和固定状态取高值
+    # 4. 重要度和固定状态取高值
     if (src["importance"] or 1) > (tgt["importance"] or 1):
         await db.execute("UPDATE entities SET importance=? WHERE name=?", (src["importance"], target))
     if src["pinned"]:
@@ -441,13 +618,12 @@ async def merge_entities(source: str, target: str) -> str:
 
     await db.commit()
 
-    # 7. 软删除源实体
+    # 5. 软删除源实体
     await soft_delete_entity(source)
 
     return (
         f"已合并实体「{source}」→「{target}」："
-        f"迁移出边 {stats['relations_out']} 条、入边 {stats['relations_in']} 条、"
-        f"事实 {stats['facts']} 条、属性 {stats['props']} 项。"
+        f"合并关系 {len(src_rels)} 条、事实 {stats['facts']} 条、属性 {stats['props']} 项。"
     )
 
 
@@ -455,7 +631,7 @@ async def merge_entities(source: str, target: str) -> str:
 
 
 async def get_entity_neighborhood(entity_name: str, depth: int = 2) -> dict:
-    """BFS 查询指定实体的 N 层关联子图。
+    """BFS 查询指定实体的 N 层关联子图（基于 relation_index）。
 
     返回: {
         "center": {"name": ..., "type": ..., "importance": ..., "facts": [...]},
@@ -488,20 +664,26 @@ async def get_entity_neighborhood(entity_name: str, depth: int = 2) -> dict:
         "facts": center_facts,
     }
 
-    # BFS 展开
+    # BFS 展开（基于 relation_index）
     visited = {entity_name}
     current_level = [entity_name]
-    all_layers = []
+    all_layers: list[list[dict]] = []
     all_entity_names = {entity_name}
 
     for _ in range(depth):
         if not current_level:
             break
         placeholders = ",".join("?" for _ in current_level)
+
+        # 出边 + 入边 UNION（relation_index 无 type，需要 JOIN entities）
         cur = await db.execute(f"""
-            SELECT from_type, from_name, rel_type, to_type, to_name
-            FROM relations
-            WHERE deprecated_at IS NULL AND (from_name IN ({placeholders}) OR to_name IN ({placeholders}))
+            SELECT ri.entity_name AS from_name, ri.target_name AS to_name,
+                   ri.rel_type, e_from.type AS from_type, e_to.type AS to_type
+            FROM relation_index ri
+            JOIN entities e_from ON e_from.name = ri.entity_name
+            JOIN entities e_to ON e_to.name = ri.target_name
+            WHERE ri.deprecated_at IS NULL
+              AND (ri.entity_name IN ({placeholders}) OR ri.target_name IN ({placeholders}))
         """, current_level + current_level)
 
         next_level_set: set[str] = set()
@@ -553,4 +735,34 @@ async def get_entity_neighborhood(entity_name: str, depth: int = 2) -> dict:
         "center": center,
         "layers": all_layers,
         "entities": entities_summary,
+    }
+
+
+# ── 实体详情查询 ─────────────────────────────────────────
+
+
+async def get_entity_detail(name: str) -> dict | None:
+    """精准匹配读取单个实体的完整字段。未找到返回 None。"""
+    db = await _connect()
+    cur = await db.execute(
+        "SELECT name, type, content, relations, properties, "
+        "importance, pinned, is_root, created_at, updated_at, deprecated_at "
+        "FROM entities WHERE name=?",
+        (name,),
+    )
+    row = await cur.fetchone()
+    if not row:
+        return None
+    return {
+        "name": row["name"],
+        "type": row["type"],
+        "content": row["content"] or "",
+        "relations": json.loads(row["relations"] or "[]"),
+        "properties": json.loads(row["properties"] or "{}"),
+        "importance": row["importance"],
+        "pinned": bool(row["pinned"]),
+        "is_root": bool(row["is_root"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "deprecated_at": row["deprecated_at"],
     }

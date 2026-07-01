@@ -67,97 +67,71 @@ def _extract_search_keywords(query: str) -> dict[str, int]:
 
 
 async def search_entities(query: str, top_k: int) -> list[dict]:
+    """搜索实体，范围：name + type + content + relations JSON。不再遍历 facts。"""
     db = await _connect()
     keywords = _extract_search_keywords(query)
     if not keywords:
         return []
 
-    cursor = await db.execute("SELECT name, type, properties, importance, pinned FROM entities WHERE deprecated_at IS NULL")
+    cursor = await db.execute(
+        "SELECT name, type, content, relations, properties, importance, pinned "
+        "FROM entities WHERE deprecated_at IS NULL"
+    )
     rows = await cursor.fetchall()
-
-    # 一次性拉取所有事实，避免 N+1 且用 JSON 解析精确匹配 about_entities
-    facts_cur = await db.execute("SELECT content, type, about_entities FROM facts WHERE deprecated_at IS NULL")
-    all_facts = [(json.loads(f["about_entities"]), f["content"], f["type"]) for f in await facts_cur.fetchall()]
 
     scored = []
     for row in rows:
         name_lower = row["name"].lower()
         type_lower = row["type"].lower()
+        content_lower = (row["content"] or "").lower()
+        rels_text = (row["relations"] or "[]").lower()
         props = json.loads(row["properties"])
         props_text = json.dumps(props, ensure_ascii=False).lower()
 
         score = 0
         for kw, weight in keywords.items():
+            # 名称匹配（权重最高）
             if kw == name_lower:
                 score += 12
             elif kw in name_lower or (weight >= 2 and name_lower in kw):
                 score += 10 if weight >= 5 else 6 if weight >= 2 else 3
+            # 类型匹配
             if kw == type_lower:
                 score += 4
-            elif kw in type_lower or kw in props_text:
+            elif kw in type_lower:
+                score += 2 if weight >= 2 else 1
+            # 内容匹配（替代原来 facts 的职能）
+            if kw in content_lower:
+                score += 4 if weight >= 5 else 2 if weight >= 2 else 1
+            # relations JSON 文本匹配
+            if kw in rels_text:
+                score += 2 if weight >= 2 else 1
+            # 属性匹配
+            if kw in props_text:
                 score += 2 if weight >= 2 else 1
 
-        for about_entities, content, _ftype in all_facts:
-            if row["name"] not in about_entities:
-                continue
-            content_lower = content.lower()
-            for kw, weight in keywords.items():
-                if kw in content_lower:
-                    score += 4 if weight >= 5 else 2 if weight >= 2 else 1
-
         if score >= _MIN_SEARCH_SCORE:
-            scored.append((row["name"], row["type"], row["properties"], row["importance"], row["pinned"], score))
+            scored.append((row["name"], row["type"], row["importance"], row["pinned"], score))
 
-    scored.sort(key=lambda x: x[5], reverse=True)
+    scored.sort(key=lambda x: x[4], reverse=True)
 
     if not scored:
         return []
 
-    results = []
-    for name, etype, props_json, importance, pinned, score in scored[:top_k]:
-        results.append({
-            "entity": name,
-            "type": etype,
-            "importance": importance,
-            "pinned": bool(pinned),
-        })
-
-    return results
+    return [
+        {"entity": name, "type": etype, "importance": imp, "pinned": bool(pin)}
+        for name, etype, imp, pin, _ in scored[:top_k]
+    ]
 
 
 async def get_pinned_entities() -> list[dict]:
-    """获取所有固定注入的实体及其关联信息"""
+    """获取所有固定注入的实体（不含 facts 关联）。"""
     db = await _connect()
     cur = await db.execute(
         "SELECT name, type, importance, pinned FROM entities "
         "WHERE pinned=1 AND deprecated_at IS NULL ORDER BY importance DESC"
     )
-    rows = await cur.fetchall()
-
-    if not rows:
-        return []
-
-    # 一次性拉取所有事实
-    facts_cur = await db.execute("SELECT content, type, about_entities FROM facts WHERE deprecated_at IS NULL")
-    all_facts = [(json.loads(f["about_entities"]), f["content"], f["type"]) for f in await facts_cur.fetchall()]
-
-    results = []
-    for row in rows:
-        name, etype, importance, pinned = row["name"], row["type"], row["importance"], row["pinned"]
-
-        entity_facts = []
-        for about_entities, content, ftype in all_facts:
-            if name in about_entities:
-                entity_facts.append({"content": content, "type": ftype})
-                if len(entity_facts) >= 3:
-                    break
-
-        results.append({
-            "entity": name,
-            "type": etype,
-            "facts": entity_facts,
-            "importance": importance,
-            "pinned": bool(pinned),
-        })
-
-    return results
+    return [
+        {"entity": r["name"], "type": r["type"], "importance": r["importance"], "pinned": bool(r["pinned"])}
+        for r in await cur.fetchall()
+    ]

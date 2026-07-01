@@ -10,6 +10,11 @@ const router = createRouter({
       component: HomeView,
     },
     {
+      path: '/graph',
+      name: 'graph',
+      component: () => import('@/views/GraphPageView.vue'),
+    },
+    {
       path: '/chat',
       name: 'chat',
       component: () => import('@/views/ChatView.vue'),

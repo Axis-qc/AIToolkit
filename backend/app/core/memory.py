@@ -7,27 +7,36 @@ async def search(query: str, top_k: int = 5) -> list[dict]:
     return await graph.search_entities(query, top_k)
 
 
-async def save(nodes: list[dict], relations: list[dict], facts: list[dict] | None = None, conv_id: str | None = None, importance: int | None = None, pinned: bool | None = None):
+async def get_entity(name: str) -> dict | None:
+    """精准匹配读取单个实体的完整字段。"""
+    return await graph.get_entity_detail(name)
+
+
+async def save(
+    nodes: list[dict],
+    facts: list[dict] | None = None,
+    conv_id: str | None = None,
+    importance: int | None = None,
+    pinned: bool | None = None,
+    is_root: bool | None = None,
+):
+    """保存到图谱。nodes 中可含 content/relations（新格式）。
+    relations 必须嵌入到对应 node 的 relations 字段，不再接受顶层 relations 参数。
+    """
     for node in nodes:
         name = node["name"]
         ntype = node["type"]
+        content = node.get("content", "")
+        rels = node.get("relations", None)
         props = node.get("properties", {})
-        await graph.upsert_entity(name, ntype, props)
+        node_is_root = node.get("is_root", is_root)
+        effective_root = bool(node_is_root) if node_is_root is not None else False
+        await graph.upsert_entity(name, ntype, content=content, relations=rels, props=props, is_root=effective_root)
         await graph.bump_importance(name)
         if importance is not None:
             await graph.set_importance(name, importance)
         if pinned is not None:
             await graph.set_pinned(name, pinned)
-
-    for rel in relations:
-        await graph.upsert_relation(
-            from_type=rel["from_type"],
-            from_name=rel["from_name"],
-            to_type=rel["to_type"],
-            to_name=rel["to_name"],
-            rel_type=rel["rel_type"],
-            props=rel.get("properties", {}),
-        )
 
     if facts:
         for fact in facts:
@@ -62,17 +71,7 @@ async def delete_memory(target_type: str, target: str, rel_type: str | None = No
         if ok:
             return f"已标记事实 #{fact_id} 为作废，24 小时后自动清理，期间可恢复"
         return f"未找到事实 #{fact_id}"
-    elif target_type == "relation":
-        # target 格式: "from_name||to_name" 或 "from_name||to_name||rel_type"
-        parts = target.split("||")
-        if len(parts) < 2:
-            return "错误：删除 relation 需要 from_name||to_name 格式"
-        from_name, to_name = parts[0], parts[1]
-        rt = parts[2] if len(parts) > 2 else None
-        count = await graph.delete_relation(from_name, to_name, rt)
-        if count > 0:
-            return f"已删除 {count} 条关系"
-        return "未找到匹配的关系"
+
     elif target_type == "fact_by_content":
         # 根据内容关键词软删除事实（SQL LIKE，不再全量拉取）
         facts = await graph.search_facts_by_keyword(target)
@@ -144,13 +143,17 @@ async def restore(target_type: str, target: str) -> str:
 
 
 async def list_deprecated() -> str:
-    """列出所有已软删除待清理的实体和事实。"""
+    """列出所有已软删除待清理的实体、关系索引和事实。"""
     data = await graph.list_deprecated()
     lines = []
     if data["entities"]:
         lines.append(f"## 已作废实体 ({len(data['entities'])} 个)")
         for e in data["entities"]:
             lines.append(f"- [{e['type']}] {e['name']}（{e['deprecated_at']}）")
+    if data["relation_index"]:
+        lines.append(f"## 已失效关系 ({len(data['relation_index'])} 条)")
+        for r in data["relation_index"]:
+            lines.append(f"- {r['from']} → {r['to']}（{r['rel_type']}）[{r['deprecated_at']}]")
     if data["facts"]:
         lines.append(f"## 已作废事实 ({len(data['facts'])} 条)")
         for f in data["facts"]:
@@ -178,13 +181,21 @@ async def update(target_type: str, target: str, updates: dict) -> str:
         return f"未找到事实 #{fact_id}"
 
     elif target_type == "entity":
-        ok = await graph.update_entity(
-            target,
-            new_type=updates.get("type"),
-            new_props=updates.get("properties"),
-        )
+        new_name = updates.get("name")
+        try:
+            ok = await graph.update_entity(
+                target,
+                new_name=new_name,
+                new_type=updates.get("type"),
+                new_props=updates.get("properties"),
+                new_content=updates.get("content"),
+                new_relations=updates.get("relations"),
+            )
+        except ValueError as e:
+            return f"错误：{e}"
         if ok:
-            return f"已更新实体「{target}」"
+            display_name = new_name or target
+            return f"已更新实体「{display_name}」"
         return f"未找到实体「{target}」"
 
     elif target_type == "entity_importance":
@@ -207,8 +218,18 @@ async def update(target_type: str, target: str, updates: dict) -> str:
         await graph.set_pinned(target, bool(pinned))
         return f"已更新实体「{target}」固定状态为 {bool(pinned)}"
 
+    elif target_type == "entity_root":
+        is_root = updates.get("is_root")
+        if is_root is None:
+            return "错误：更新 entity_root 需要提供 is_root 字段"
+        ok = await graph.update_entity(target, new_type=None, new_props=None)
+        if not ok:
+            return f"未找到实体「{target}」"
+        await graph.set_root(target, bool(is_root))
+        return f"已更新实体「{target}」根节点状态为 {bool(is_root)}"
+
     else:
-        return f"未知的更新目标类型: {target_type}，支持: fact / entity / entity_importance / entity_pinned"
+        return f"未知的更新目标类型: {target_type}，支持: fact / entity / entity_importance / entity_pinned / entity_root"
 
 
 async def merge(source: str, target: str) -> str:

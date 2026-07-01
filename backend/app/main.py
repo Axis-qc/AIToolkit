@@ -12,7 +12,8 @@ from app.api.graph import router as graph_router
 async def lifespan(app: FastAPI):
     logger.init()
     await graph.init_db()
-    yield
+    async with mcp_server.mcp.session_manager.run():
+        yield
     await graph.close()
     logger.close()
 
@@ -32,6 +33,9 @@ app.include_router(graph_router)
 
 # ── MCP SSE 端点 ──────────────────────────────────────
 app.mount("/mcp", mcp_server.mcp.sse_app())
+
+# ── MCP Streamable HTTP 端点（Codex 自定义 MCP） ─────────
+app.routes.extend(mcp_server.mcp.streamable_http_app().routes)
 
 # ── MCP 直通端点 ──────────────────────────────────────
 from starlette.responses import JSONResponse

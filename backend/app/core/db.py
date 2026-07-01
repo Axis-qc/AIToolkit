@@ -164,7 +164,7 @@ async def close():
 async def cleanup_expired():
     """物理删除 24 小时前软删除的实体、关系索引、关系和事实。"""
     db = await _connect()
-    deadline = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    deadline = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y:%m:%d:%H:%M:%S")
 
     await db.execute("DELETE FROM entities WHERE deprecated_at IS NOT NULL AND deprecated_at <= ?", (deadline,))
     await db.execute("DELETE FROM relation_index WHERE deprecated_at IS NOT NULL AND deprecated_at <= ?", (deadline,))

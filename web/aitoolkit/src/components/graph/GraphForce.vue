@@ -98,7 +98,8 @@ async function renderGraph() {
     simulation = d3.forceSimulation<SimNode>(nodes)
       .force('link', d3.forceLink<SimNode, SimLink>(links).id(d => d.id).distance(120))
       .force('charge', d3.forceManyBody().strength(-300))
-      .force('center', d3.forceCenter(width / 2, height / 2))
+      .force('x', d3.forceX(width / 2).strength(0.06))
+      .force('y', d3.forceY(height / 2).strength(0.06))
       .force('collision', d3.forceCollide<SimNode>().radius(d => 20 + Math.sqrt(d.importance || 1) * 6))
 
     // 边

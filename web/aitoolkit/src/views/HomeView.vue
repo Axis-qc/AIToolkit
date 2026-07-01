@@ -12,10 +12,10 @@ interface FeatureCard {
 
 const cards: FeatureCard[] = [
   {
-    title: '知识图谱对话',
-    description: '以你为中心的知识图谱记忆系统，AI 持久化记忆，跨对话检索。每次对话都基于过去的记忆。',
+    title: '知识图谱',
+    description: '可视化浏览知识图谱，力导向图与树形浏览双模式，探索实体关系网络。',
     icon: '◈',
-    route: '/chat',
+    route: '/graph',
     available: true,
     accent: '#7c5cfc',
   },
@@ -24,7 +24,7 @@ const cards: FeatureCard[] = [
     description: '各类实用网页工具的集合，提升日常工作效率。',
     icon: '⬡',
     route: '/tools',
-    available: false,
+    available: true,
     accent: '#4da6d9',
   },
   {

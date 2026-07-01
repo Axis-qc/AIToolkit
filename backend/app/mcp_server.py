@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 async def mcp_oneshot_app(scope: Scope, receive: Receive, send: Send) -> None:
     """
     绕过 SSE 会话检查，直接处理单次 MCP 请求。
+挂在 /mcp-direct 路径下，避免与 SSE mount 冲突。
 
     为每个 POST 请求创建一个独立的 stateless MCP session，
     处理完立即返回结果，不依赖持久 SSE 连接。
@@ -120,7 +121,7 @@ async def mcp_oneshot_app(scope: Scope, receive: Receive, send: Send) -> None:
 # ============================================================
 # MCP 服务器实例
 # ============================================================
-mcp = FastMCP("Knowledge Graph")
+mcp = FastMCP("Knowledge Graph", streamable_http_path="/mcp-http")
 
 
 # ============================================================
@@ -131,17 +132,10 @@ class GraphNode(BaseModel):
     """图谱中的实体节点"""
     name: str = Field(description="实体名称")
     type: str = Field(description="实体类型，如 User/Project/AI")
+    content: str = Field(description="实体内容（描述/备注），必填，简要说明该实体是什么")
+    relations: list[dict] = Field(default_factory=list, description="关系声明，如 [{name:目标实体,rel:了解}]")
     properties: dict = Field(default_factory=dict, description="附加属性")
-
-
-class GraphRelation(BaseModel):
-    """实体间的关系"""
-    from_type: str = Field(description="来源实体类型")
-    from_name: str = Field(description="来源实体名称")
-    to_type: str = Field(description="目标实体类型")
-    to_name: str = Field(description="目标实体名称")
-    rel_type: str = Field(description="关系类型，如 '包含'/'了解'")
-    properties: dict = Field(default_factory=dict, description="关系属性")
+    is_root: bool | None = Field(default=None, description="是否设为根节点")
 
 
 class GraphFact(BaseModel):
@@ -154,6 +148,20 @@ class GraphFact(BaseModel):
 # ============================================================
 # MCP 工具 —— 所有工具直接调 core/memory
 # ============================================================
+
+@mcp.tool(
+    name="get_entity",
+    description="精准匹配读取单个实体的完整字段（name/type/content/relations/properties/importance/pinned/is_root/created_at/updated_at/deprecated_at）。未找到返回 null。"
+)
+async def get_entity(
+    name: str = Field(description="实体名称（精准匹配）"),
+) -> dict | None:
+    """MCP 工具入口 —— 读取实体完整信息。"""
+    try:
+        return await mem.get_entity(name)
+    except Exception as e:
+        return {"error": f"(无法读取实体: {e})"}
+
 
 @mcp.tool(
     name="search_memory",
@@ -170,26 +178,26 @@ async def search_memory(query: str, top_k: int = 5) -> list[dict]:
 @mcp.tool(
     name="save_to_graph",
     description=(
-        "将实体、关系和事实保存到知识图谱。"
-        "nodes 是实体列表，relations 是关系列表，facts 是事实列表。"
-        "三者均可选，至少提供一个。"
+        "将实体和事实保存到知识图谱。"
+        "nodes 是实体列表（每个节点必填 content 描述字段，"
+        "可含 relations 关系声明，relations 会自动构建关系索引），"
+        "facts 是事实列表。三者均可选，至少提供一个。"
     )
 )
 async def save_to_graph(
-    nodes: list[GraphNode] = Field(default_factory=list, description="要新增或更新的实体"),
-    relations: list[GraphRelation] = Field(default_factory=list, description="实体间的关系"),
+    nodes: list[GraphNode] = Field(default_factory=list, description="要新增或更新的实体（可含 content/relations）"),
     facts: list[GraphFact] | None = Field(default=None, description="要记住的事实"),
     importance: int | None = Field(default=None, ge=1, le=10, description="重要性（1-10）"),
     pinned: bool | None = Field(default=None, description="是否固定"),
+    is_root: bool | None = Field(default=None, description="是否设为根节点"),
 ) -> str:
     """MCP 工具入口 —— 保存到图谱。"""
     try:
         nodes_dict = [n.model_dump() for n in nodes]
-        rels_dict = [r.model_dump() for r in relations]
         facts_dict = [f.model_dump() for f in facts] if facts else None
         return await mem.save(
-            nodes_dict, rels_dict, facts_dict,
-            importance=importance, pinned=pinned,
+            nodes_dict, facts=facts_dict,
+            importance=importance, pinned=pinned, is_root=is_root,
         )
     except Exception as e:
         return f"(无法保存到图谱: {e})"
@@ -216,21 +224,19 @@ async def list_memory(
 @mcp.tool(
     name="delete_from_graph",
     description=(
-        "从知识图谱中删除实体、事实或关系。"
+        "从知识图谱中删除实体或事实。"
         "target_type='entity' 时 target 填实体名称；"
         "target_type='fact' 时 target 填事实 ID；"
-        "target_type='fact_by_content' 时 target 填关键词；"
-        "target_type='relation' 时 target 填 'from_name||to_name'"
+        "target_type='fact_by_content' 时 target 填关键词。"
     )
 )
 async def delete_from_graph(
-    target_type: str = Field(description="删除类型：entity/fact/fact_by_content/relation"),
+    target_type: str = Field(description="删除类型：entity/fact/fact_by_content"),
     target: str = Field(description="目标标识（含义见描述）"),
-    rel_type: str | None = Field(default=None, description="仅 relation 类型时可选，精确匹配关系类型"),
 ) -> str:
     """MCP 工具入口 —— 从图谱删除内容。"""
     try:
-        return await mem.delete_memory(target_type, target, rel_type=rel_type)
+        return await mem.delete_memory(target_type, target)
     except Exception as e:
         return f"(无法删除记忆: {e})"
 
@@ -240,9 +246,10 @@ async def delete_from_graph(
     description=(
         "更新知识图谱中的已有记忆。支持更新事实内容和实体属性。"
         "target_type='fact' 时 target 填事实的数字 ID，updates 可含 content/type/about_entities；"
-        "target_type='entity' 时 target 填实体名称，updates 可含 type/properties；"
+        "target_type='entity' 时 target 填实体名称，updates 可含 type/properties/content/relations；"
         "target_type='entity_importance' 时 target 填实体名称，updates 需含 importance(1-10)；"
-        "target_type='entity_pinned' 时 target 填实体名称，updates 需含 pinned(true/false)。"
+        "target_type='entity_pinned' 时 target 填实体名称，updates 需含 pinned(true/false)；"
+        "target_type='entity_root' 时 target 填实体名称，updates 需含 is_root(true/false)。"
     )
 )
 async def update_memory(
