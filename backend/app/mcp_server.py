@@ -222,6 +222,22 @@ async def list_memory(
 
 
 @mcp.tool(
+    name="list_pinned",
+    description=(
+        "列出所有固定（pinned）注入的实体，按重要度降序，"
+        "含完整字段（name/type/content/relations/properties/importance）。"
+        "适合每轮对话开始前注入的常驻规则记忆。"
+    )
+)
+async def list_pinned() -> list[dict]:
+    """MCP 工具入口 —— 列出所有固定注入的实体。"""
+    try:
+        return await mem.list_pinned()
+    except Exception as e:
+        return [{"error": f"(无法列出固定实体: {e})"}]
+
+
+@mcp.tool(
     name="delete_from_graph",
     description=(
         "从知识图谱中删除实体或事实。"

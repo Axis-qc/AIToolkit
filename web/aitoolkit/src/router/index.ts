@@ -15,14 +15,14 @@ const router = createRouter({
       component: () => import('@/views/GraphPageView.vue'),
     },
     {
-      path: '/chat',
-      name: 'chat',
-      component: () => import('@/views/ChatView.vue'),
-    },
-    {
       path: '/tools',
       name: 'tools',
       component: () => import('@/views/ToolsView.vue'),
+    },
+    {
+      path: '/phone-monitor',
+      name: 'phone-monitor',
+      component: () => import('@/views/PhoneMonitorView.vue'),
     },
     {
       path: '/games',

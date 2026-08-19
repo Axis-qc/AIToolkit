@@ -5,3 +5,4 @@ pydantic
 pydantic-settings
 pyyaml
 mcp>=1.0.0
+paramiko

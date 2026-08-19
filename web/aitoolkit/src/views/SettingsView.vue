@@ -1,609 +1,192 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, onMounted } from 'vue'
+import {
+  PRESETS,
+  DEFAULT_ACCENT,
+  normalizeAccent,
+  applyTheme,
+  initTheme,
+  saveTheme,
+  resetTheme,
+} from '@/stores/theme'
 
-interface ModelOption {
-  value: string
-  label: string
-  provider: string
-}
-
-interface ProviderConfig {
-  api_key: string
-  base_url: string
-  chat_model: string
-}
-
-interface SettingsData {
-  chat_provider: string
-  providers: Record<string, ProviderConfig>
-  preheat_files: string
-  available_models: ModelOption[]
-  fetched_models?: Record<string, string[]>
-}
-
-const router = useRouter()
-const loading = ref(false)
+const hexInput = ref(DEFAULT_ACCENT)
+const saving = ref(false)
 const saved = ref(false)
 const error = ref('')
-const activeProvider = ref('deepseek')
-const fetchingModels = ref(false)
 
-const providers = reactive<Record<string, ProviderConfig>>({
-  deepseek: { api_key: '', base_url: '', chat_model: '' },
-  openai: { api_key: '', base_url: '', chat_model: '' },
-  anthropic: { api_key: '', base_url: '', chat_model: '' },
+onMounted(async () => {
+  await initTheme()
+  hexInput.value = normalizeAccent(document.documentElement.style.getPropertyValue('--accent')) || DEFAULT_ACCENT
 })
 
-const chatProvider = ref('deepseek')
-const preheatFiles = ref('')
-const availableModels = ref<ModelOption[]>([])
-const fetchedModels = reactive<Record<string, string[]>>({
-  deepseek: [],
-  openai: [],
-  anthropic: [],
-})
-
-const showKey = reactive<Record<string, boolean>>({
-  deepseek: false,
-  openai: false,
-  anthropic: false,
-})
-
-const activeConfig = computed(() => providers[activeProvider.value] || { api_key: '', base_url: '', chat_model: '' })
-const activeFetchedModels = computed(() => fetchedModels[activeProvider.value])
-
-async function loadSettings() {
-  try {
-    const res = await fetch('/api/settings')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data: SettingsData = await res.json()
-    chatProvider.value = data.chat_provider
-    const names = Object.keys(data.providers) as (keyof typeof providers)[]
-    for (const name of names) {
-      const cfg = data.providers[name]
-      if (cfg) providers[name] = cfg
-    }
-    preheatFiles.value = data.preheat_files
-    availableModels.value = data.available_models || []
-    if (data.fetched_models) {
-      for (const key of Object.keys(data.fetched_models)) {
-        if (key in fetchedModels) {
-          fetchedModels[key as keyof typeof fetchedModels] = data.fetched_models[key] || []
-        }
-      }
-    }
-  } catch (e: any) {
-    error.value = `加载失败: ${e.message}`
-  }
+/** 实时预览：仅本地应用，不落盘 */
+function onInput(hex: string) {
+  const v = (hex || '').trim()
+  hexInput.value = v
+  if (normalizeAccent(v)) applyTheme(v)
 }
 
-async function fetchModels(provider: string) {
-  fetchingModels.value = true
-  try {
-    const res = await fetch(`/api/settings/models?provider=${provider}`)
-    if (!res.ok) return
-    const data = await res.json()
-    fetchedModels[provider] = (data.data || []).map((m: any) => m.id)
-  } catch {
-    // ignore
-  } finally {
-    fetchingModels.value = false
-  }
-}
-
-async function saveSettings() {
-  loading.value = true
+async function onSave() {
   error.value = ''
   saved.value = false
-  try {
-    const res = await fetch('/api/settings', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_provider: chatProvider.value,
-        providers: {
-          deepseek: providers.deepseek,
-          openai: providers.openai,
-          anthropic: providers.anthropic,
-        },
-        preheat_files: preheatFiles.value,
-      }),
-    })
-    if (!res.ok) {
-      const data = await res.json()
-      throw new Error(data.detail || `HTTP ${res.status}`)
-    }
-    const result = await res.json()
-    if (result.providers) {
-      for (const name of Object.keys(result.providers)) {
-        if (providers[name]) {
-          providers[name] = result.providers[name]
-        }
-      }
-    }
-    if (result.fetched_models) {
-      for (const key of Object.keys(result.fetched_models)) {
-        if (key in fetchedModels) {
-          fetchedModels[key as keyof typeof fetchedModels] = result.fetched_models[key] || []
-        }
-      }
-    }
+  saving.value = true
+  const res = await saveTheme(hexInput.value)
+  saving.value = false
+  if (res.ok) {
     saved.value = true
-    setTimeout(() => (saved.value = false), 3000)
-  } catch (e: any) {
-    error.value = e.message
-  } finally {
-    loading.value = false
+    setTimeout(() => (saved.value = false), 1800)
+  } else {
+    error.value = res.error || '保存失败'
   }
 }
 
-function isMasked(val: string): boolean {
-  return val.includes('...') || val.startsWith('*')
+async function onReset() {
+  hexInput.value = DEFAULT_ACCENT
+  await resetTheme()
+  error.value = ''
 }
-
-onMounted(loadSettings)
 </script>
 
 <template>
-  <div class="settings-page">
-    <div class="bg-orbs">
-      <div class="orb orb-1"></div>
-      <div class="orb orb-2"></div>
-    </div>
-    <div class="grid-overlay"></div>
+  <div class="theme-page">
+    <section class="theme-intro">
+      <div>
+        <div class="section-kicker">APPEARANCE / THEME CONTROL</div>
+        <h2>主题外观</h2>
+        <p>自由调整主色，系统自动派生高光、暗色与线条配色。选择即实时预览，保存后写入本机配置。</p>
+      </div>
+      <div class="live-chip">
+        <span class="live-dot"></span>
+        <strong>LIVE PREVIEW</strong>
+      </div>
+    </section>
 
-    <div class="content">
-      <header class="page-header">
-        <button class="back-btn" @click="router.push('/')">返回</button>
-        <h1>设置</h1>
-        <p class="subtitle">多 Provider 管理 · API 配置 · 模型切换</p>
-      </header>
-
-      <form class="settings-form" @submit.prevent="saveSettings">
-        <div class="form-body">
-          <!-- Provider 切换 -->
-          <div class="field">
-            <label>当前使用的 Provider</label>
-            <select v-model="chatProvider">
-              <option value="deepseek">DeepSeek</option>
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-            </select>
-            <span class="hint">切换后对话将使用对应 Provider 的 API Key 和模型</span>
-          </div>
-
-          <!-- Per-Provider 配置区 -->
-          <div class="provider-tabs">
-            <button
-              v-for="p in ['deepseek', 'openai', 'anthropic']"
-              :key="p"
-              type="button"
-              class="tab-btn"
-              :class="{ active: activeProvider === p }"
-              @click="activeProvider = p"
-            >
-              {{ p === 'deepseek' ? 'DeepSeek' : p === 'openai' ? 'OpenAI' : 'Anthropic' }}
-            </button>
-          </div>
-
-          <div class="provider-section">
-            <div class="field">
-              <label :for="'api_key_' + activeProvider">API Key</label>
-              <div class="key-input-wrap">
-                <input
-                  :id="'api_key_' + activeProvider"
-                  v-model="activeConfig.api_key"
-                  :type="showKey[activeProvider] ? 'text' : 'password'"
-                  :placeholder="isMasked(activeConfig.api_key) ? '已配置（留空不修改）' : 'sk-...'"
-                />
-                <button type="button" class="toggle-btn" @click="showKey[activeProvider] = !showKey[activeProvider]">
-                  {{ showKey[activeProvider] ? '隐藏' : '显示' }}
-                </button>
-              </div>
-              <span class="hint">修改后保存，含 <code>...</code> 或全星号表示不更新</span>
-            </div>
-
-            <div class="field">
-              <label :for="'base_url_' + activeProvider">API 地址</label>
-              <input
-                :id="'base_url_' + activeProvider"
-                v-model="activeConfig.base_url"
-                type="text"
-                placeholder="https://api.deepseek.com"
-              />
-            </div>
-
-            <div class="field">
-              <label :for="'chat_model_' + activeProvider">模型</label>
-              <div class="model-row">
-                <select
-                  :id="'chat_model_' + activeProvider"
-                  v-model="activeConfig.chat_model"
-                  class="model-select"
-                >
-                  <option value="" disabled>选择模型...</option>
-                  <optgroup
-                    v-for="group in [...new Set(availableModels.filter(m => m.provider === activeProvider).map(m => m.provider))]"
-                    :key="group"
-                    :label="group === activeProvider ? activeProvider : group"
-                  >
-                    <option
-                      v-for="m in availableModels.filter(x => x.provider === activeProvider)"
-                      :key="m.value"
-                      :value="m.value"
-                    >
-                      {{ m.label }}
-                    </option>
-                  </optgroup>
-                  <option
-                    v-for="mid in activeFetchedModels"
-                    :key="mid"
-                    :value="mid"
-                  >
-                    {{ mid }}
-                  </option>
-                </select>
-                <button type="button" class="fetch-btn" :disabled="fetchingModels" @click="fetchModels(activeProvider)">
-                  {{ fetchingModels ? '拉取中...' : '拉取列表' }}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <!-- Preheat Files -->
-          <div class="field">
-            <label for="preheat_files">预热白名单</label>
-            <input
-              id="preheat_files"
-              v-model="preheatFiles"
-              type="text"
-              placeholder="app/core/:*.py app/tools/:*.py"
-            />
-            <span class="hint">空格分隔，格式 path[:ext1,ext2]</span>
-          </div>
+    <section class="theme-card">
+      <div class="theme-row">
+        <label>主色</label>
+        <div class="picker-wrap">
+          <input
+            type="color"
+            class="color-input"
+            :value="normalizeAccent(hexInput) || '#000000'"
+            @input="onInput(($event.target as HTMLInputElement).value)"
+          />
+          <input
+            class="hex-input"
+            :value="hexInput"
+            spellcheck="false"
+            placeholder="#d4af37"
+            @input="onInput(($event.target as HTMLInputElement).value)"
+          />
         </div>
+      </div>
 
-        <!-- Actions -->
-        <div class="actions">
-          <button type="submit" class="save-btn" :disabled="loading">
-            {{ loading ? '保存中...' : '保存所有配置' }}
+      <div class="theme-row">
+        <label>快捷预设</label>
+        <div class="presets">
+          <button
+            v-for="p in PRESETS"
+            :key="p.color"
+            :class="['preset', { active: normalizeAccent(hexInput) === p.color }]"
+            :style="{ '--swatch': p.color }"
+            :title="p.name"
+            @click="onInput(p.color)"
+          >
+            <span class="swatch"></span>
+            <span class="preset-name">{{ p.name }}</span>
           </button>
-          <span v-if="saved" class="toast-success">配置已保存</span>
-          <span v-if="error" class="toast-error">{{ error }}</span>
         </div>
-      </form>
-    </div>
+      </div>
+
+      <div class="preview">
+        <div class="preview-card">
+          <div class="preview-head">
+            <span class="pv-kicker">PREVIEW / SAMPLE</span>
+            <strong>模块卡片</strong>
+          </div>
+          <div class="preview-kpi">
+            <span class="pv-label">主色示例</span>
+            <strong class="pv-big">{{ normalizeAccent(hexInput) || '无效' }}</strong>
+          </div>
+          <div class="pv-bar"><i></i></div>
+          <div class="pv-actions">
+            <button class="pv-btn">主要操作</button>
+            <span class="pv-tag">状态标签</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="theme-actions">
+        <button class="save-btn" :disabled="saving" @click="onSave">
+          {{ saving ? '保存中' : '保存主题' }}
+        </button>
+        <button class="reset-btn" @click="onReset">恢复默认</button>
+        <span v-if="saved" class="toast-success">已保存到本机配置</span>
+        <span v-else-if="error" class="toast-error">{{ error }}</span>
+      </div>
+    </section>
   </div>
 </template>
 
 <style scoped>
-.settings-page {
-  height: 100vh;
-  background: #0b0d17;
-  color: #e0e0e0;
-  position: relative;
-  overflow: hidden;
-  display: flex;
-  justify-content: center;
-  padding: 20px;
-  box-sizing: border-box;
-}
+.theme-page { max-width: 1080px; margin: 0 auto; padding-top: 34px; }
 
-.bg-orbs {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
+.section-kicker { color: var(--accent); font: 10px Consolas, monospace; letter-spacing: .18em; }
+.theme-intro { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 28px 0 30px; border-bottom: 1px solid var(--line); }
+.theme-intro h2 { margin: 12px 0 8px; font-size: 34px; letter-spacing: -.03em; }
+.theme-intro p { margin: 0; color: var(--muted); font-size: 13px; }
 
-.orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(120px);
-  opacity: 0.25;
-  animation: orb-drift 20s ease-in-out infinite alternate;
-}
+.live-chip { display: flex; align-items: center; gap: 9px; padding: 12px 14px; border: 1px solid var(--line-strong); color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); font: 11px Consolas, monospace; }
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); animation: live-pulse 1.6s ease-in-out infinite; }
+@keyframes live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 
-.orb-1 {
-  width: 600px;
-  height: 600px;
-  background: radial-gradient(circle, #7c5cfc44, transparent 70%);
-  top: -15%;
-  left: -10%;
-  animation-delay: 0s;
-}
+.theme-card { margin-top: 20px; padding: 24px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: var(--shadow); }
 
-.orb-2 {
-  width: 500px;
-  height: 500px;
-  background: radial-gradient(circle, #4da6d922, transparent 70%);
-  bottom: -20%;
-  right: -8%;
-  animation-delay: -7s;
-}
+.theme-row { display: flex; align-items: center; gap: 18px; padding: 13px 0; border-bottom: 1px solid var(--line); }
+.theme-row label { flex: 0 0 92px; color: var(--muted); font: 11px Consolas, monospace; letter-spacing: .1em; text-transform: uppercase; }
 
-@keyframes orb-drift {
-  0% { transform: translate(0, 0) scale(1); }
-  100% { transform: translate(40px, -30px) scale(1.15); }
-}
+.picker-wrap { display: flex; align-items: center; gap: 12px; }
+.color-input { width: 46px; height: 34px; padding: 0; border: 1px solid var(--line-strong); border-radius: 6px; background: transparent; cursor: pointer; }
+.color-input::-webkit-color-swatch-wrapper { padding: 3px; }
+.color-input::-webkit-color-swatch { border: none; border-radius: 4px; }
+.hex-input { width: 150px; padding: 9px 12px; color: var(--text); background: var(--bg-1); border: 1px solid var(--line); border-radius: 6px; font: 13px Consolas, monospace; outline: none; transition: border-color .2s; }
+.hex-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent); }
 
-.grid-overlay {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
-  background-size: 64px 64px;
-  pointer-events: none;
-  mask-image: radial-gradient(ellipse at center, black 30%, transparent 70%);
-}
+.presets { display: flex; flex-wrap: wrap; gap: 8px; }
+.preset { display: flex; align-items: center; gap: 7px; padding: 6px 11px 6px 7px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: var(--bg-1); cursor: pointer; font-size: 12px; transition: 180ms ease; }
+.preset:hover { color: var(--text); border-color: var(--line-strong); }
+.preset.active { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.swatch { width: 16px; height: 16px; border-radius: 50%; background: var(--swatch); box-shadow: 0 0 10px color-mix(in srgb, var(--swatch) 55%, transparent); }
+.preset-name { font-family: Consolas, monospace; font-size: 11px; letter-spacing: .05em; }
 
-.content {
-  position: relative;
-  z-index: 1;
-  width: 100%;
-  max-width: 680px;
-}
+.preview { padding: 18px 0; }
+.preview-card { max-width: 460px; padding: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-soft); transition: border-color .2s; }
+.preview-card:hover { border-color: var(--line-strong); }
+.preview-head { display: flex; align-items: center; justify-content: space-between; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.pv-kicker { color: var(--accent); font: 10px Consolas, monospace; letter-spacing: .16em; }
+.preview-head strong { color: var(--text); font-size: 13px; font-weight: 600; }
+.preview-kpi { display: flex; align-items: baseline; justify-content: space-between; padding: 16px 0 10px; }
+.pv-label { color: var(--muted); font-size: 11px; }
+.pv-big { color: var(--accent); font: 700 20px Consolas, monospace; text-shadow: 0 0 18px color-mix(in srgb, var(--accent) 45%, transparent); letter-spacing: .04em; }
+.pv-bar { height: 4px; overflow: hidden; border-radius: 2px; background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.pv-bar i { display: block; width: 62%; height: 100%; background: linear-gradient(90deg, var(--accent-deep), var(--accent-bright)); box-shadow: 0 0 14px var(--accent); }
+.pv-actions { display: flex; align-items: center; gap: 12px; padding-top: 16px; }
+.pv-btn { padding: 9px 16px; border: 1px solid var(--accent); border-radius: 6px; color: var(--bg-0); background: linear-gradient(135deg, var(--accent-bright), var(--accent)); font: 600 12px Consolas, monospace; box-shadow: 0 0 20px color-mix(in srgb, var(--accent) 22%, transparent); }
+.pv-tag { padding: 5px 11px; border: 1px solid var(--line-strong); border-radius: 99px; color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); font: 10px Consolas, monospace; letter-spacing: .08em; }
 
-.page-header {
-  text-align: center;
-  margin-bottom: 20px;
-  position: relative;
-}
+.theme-actions { display: flex; align-items: center; gap: 12px; padding-top: 18px; border-top: 1px solid var(--line); }
+.save-btn { padding: 11px 22px; border: 1px solid var(--accent); border-radius: 6px; color: var(--bg-0); background: linear-gradient(135deg, var(--accent-bright), var(--accent)); font: 600 12px Consolas, monospace; cursor: pointer; transition: 180ms ease; }
+.save-btn:hover:not(:disabled) { box-shadow: 0 0 22px color-mix(in srgb, var(--accent) 28%, transparent); }
+.save-btn:disabled { opacity: .55; cursor: not-allowed; }
+.reset-btn { padding: 11px 18px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: var(--bg-1); font: 12px Consolas, monospace; cursor: pointer; transition: 180ms ease; }
+.reset-btn:hover { color: var(--text); border-color: var(--line-strong); }
+.toast-success { color: var(--green); font: 12px Consolas, monospace; }
+.toast-error { color: var(--red); font: 12px Consolas, monospace; }
 
-.page-header h1 {
-  font-size: 2rem;
-  margin: 0 0 8px;
-}
-
-.subtitle {
-  color: #888;
-  font-size: 0.95rem;
-}
-
-.back-btn {
-  position: absolute;
-  left: 0;
-  top: 8px;
-  background: none;
-  border: 1px solid #333;
-  color: #aaa;
-  padding: 6px 14px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 0.9rem;
-  transition: all 0.2s;
-}
-
-.back-btn:hover {
-  border-color: #7c5cfc;
-  color: #fff;
-}
-
-.settings-form {
-  background: rgba(255,255,255,0.03);
-  border: 1px solid #1e2030;
-  border-radius: 16px;
-  padding: 24px;
-  backdrop-filter: blur(12px);
-  max-height: calc(100vh - 140px);
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-}
-
-
-
-.field {
-  margin-bottom: 16px;
-}
-
-.field label {
-  display: block;
-  margin-bottom: 6px;
-  font-weight: 600;
-  color: #ccc;
-  font-size: 0.9rem;
-}
-
-.field input,
-.field select {
-  width: 100%;
-  padding: 10px 14px;
-  background: #11131f;
-  border: 1px solid #2a2d3a;
-  border-radius: 10px;
-  color: #e0e0e0;
-  font-size: 0.95rem;
-  outline: none;
-  transition: border-color 0.2s;
-  box-sizing: border-box;
-}
-
-.field input:focus,
-.field select:focus {
-  border-color: #7c5cfc;
-}
-
-.field .hint {
-  display: block;
-  margin-top: 4px;
-  font-size: 0.8rem;
-  color: #666;
-}
-
-.field .hint code {
-  background: #1a1d2e;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 0.8rem;
-}
-
-.provider-tabs {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-
-.tab-btn {
-  flex: 1;
-  padding: 10px;
-  background: #11131f;
-  border: 1px solid #2a2d3a;
-  border-radius: 10px;
-  color: #888;
-  font-size: 0.9rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.tab-btn:hover {
-  border-color: #444;
-  color: #ccc;
-}
-
-.tab-btn.active {
-  border-color: #7c5cfc;
-  color: #fff;
-  background: rgba(124, 92, 252, 0.1);
-}
-
-.provider-section {
-  background: rgba(255,255,255,0.02);
-  border: 1px solid #1e2030;
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 16px;
-}
-
-.key-input-wrap {
-  display: flex;
-  gap: 8px;
-}
-
-.key-input-wrap input {
-  flex: 1;
-}
-
-.toggle-btn {
-  background: #1a1d2e;
-  border: 1px solid #2a2d3a;
-  color: #aaa;
-  padding: 10px 14px;
-  border-radius: 10px;
-  cursor: pointer;
-  font-size: 0.9rem;
-  transition: border-color 0.2s;
-}
-
-.toggle-btn:hover {
-  border-color: #7c5cfc;
-}
-
-.model-row {
-  display: flex;
-  gap: 8px;
-}
-
-.model-select {
-  flex: 1;
-}
-
-.fetch-btn {
-  background: #1a1d2e;
-  border: 1px solid #2a2d3a;
-  color: #aaa;
-  padding: 10px 14px;
-  border-radius: 10px;
-  cursor: pointer;
-  font-size: 0.85rem;
-  white-space: nowrap;
-  transition: border-color 0.2s;
-}
-
-.fetch-btn:hover:not(:disabled) {
-  border-color: #7c5cfc;
-  color: #fff;
-}
-
-.fetch-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-select {
-  cursor: pointer;
-}
-
-select optgroup {
-  background: #11131f;
-  color: #888;
-  font-style: normal;
-}
-
-select option {
-  background: #11131f;
-  color: #e0e0e0;
-}
-
-.form-body {
-  flex: 1;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-
-.form-body::-webkit-scrollbar {
-  width: 6px;
-}
-.form-body::-webkit-scrollbar-track {
-  background: transparent;
-}
-.form-body::-webkit-scrollbar-thumb {
-  background: #2a2d3a;
-  border-radius: 3px;
-}
-
-.actions {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding-top: 20px;
-  border-top: 1px solid #1e2030;
-  margin-top: 20px;
-  flex-shrink: 0;
-  flex-wrap: wrap;
-}
-
-.save-btn {
-  padding: 12px 32px;
-  background: linear-gradient(135deg, #7c5cfc, #5b3ecc);
-  border: none;
-  border-radius: 10px;
-  color: #fff;
-  font-size: 1rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: opacity 0.2s, transform 0.1s;
-}
-
-.save-btn:hover:not(:disabled) {
-  opacity: 0.9;
-  transform: translateY(-1px);
-}
-
-.save-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.toast-success {
-  color: #4ade80;
-  font-size: 0.9rem;
-}
-
-.toast-error {
-  color: #f87171;
-  font-size: 0.9rem;
+@media (max-width: 700px) {
+  .theme-intro { align-items: start; flex-direction: column; }
+  .theme-row { align-items: start; flex-direction: column; gap: 10px; }
+  .presets { gap: 7px; }
 }
 </style>

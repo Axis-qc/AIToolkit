@@ -6,12 +6,15 @@ from app.core import graph
 from app.core import logger
 from app import mcp_server
 from app.api.graph import router as graph_router
+from app.api.phone_monitor import router as phone_router, start_poller as phone_start_poller
+from app.api.theme import router as theme_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.init()
     await graph.init_db()
+    phone_start_poller()  # 手机负载监控轮询（只读，失败仅无数据）
     async with mcp_server.mcp.session_manager.run():
         yield
     await graph.close()
@@ -30,6 +33,12 @@ app.add_middleware(
 
 # 图谱 REST 端点
 app.include_router(graph_router)
+
+# 手机负载监控端点（纯被动只读，见 api/phone_monitor.py）
+app.include_router(phone_router)
+
+# 主题持久化端点（见 api/theme.py）
+app.include_router(theme_router)
 
 # ── MCP SSE 端点 ──────────────────────────────────────
 app.mount("/mcp", mcp_server.mcp.sse_app())

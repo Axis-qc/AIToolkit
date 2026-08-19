@@ -434,14 +434,14 @@ function collapseRecursive(node: TreeNode) {
 <style scoped>
 .tree-container {
   width: 100%; height: 100%; position: relative;
-  background: #080812; overflow: hidden; display: flex; flex-direction: column;
+  background: #08080b; overflow: hidden; display: flex; flex-direction: column;
 }
 .tree-container::after {
   content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 0;
   background:
-    radial-gradient(ellipse at center, transparent 35%, rgba(4,4,10,0.55) 100%),
-    radial-gradient(ellipse at 15% 15%, rgba(99,102,241,0.04) 0%, transparent 50%),
-    radial-gradient(ellipse at 85% 85%, rgba(139,92,246,0.03) 0%, transparent 50%);
+    radial-gradient(ellipse at center, transparent 35%, rgba(4,4,8,0.55) 100%),
+    radial-gradient(ellipse at 15% 15%, color-mix(in srgb, var(--accent) 4%, transparent) 0%, transparent 50%),
+    radial-gradient(ellipse at 85% 85%, color-mix(in srgb, var(--accent) 3%, transparent) 0%, transparent 50%);
 }
 
 /* 搜索栏 */
@@ -454,8 +454,8 @@ function collapseRecursive(node: TreeNode) {
   box-shadow: 0 8px 32px rgba(0,0,0,0.5);
 }
 .search-bar:focus-within {
-  border-color: rgba(139, 92, 246, 0.45);
-  box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 24px rgba(99,102,241,0.15);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 24px color-mix(in srgb, var(--accent) 15%, transparent);
 }
 .search-icon { color: #5a5a72; flex-shrink: 0; }
 .search-input {
@@ -502,16 +502,16 @@ function collapseRecursive(node: TreeNode) {
   display: flex; align-items: center; justify-content: center;
 }
 .orbit-core {
-  width: 6px; height: 6px; border-radius: 50%; background: #a78bfa;
-  box-shadow: 0 0 12px rgba(139, 92, 246, 0.5), 0 0 24px rgba(139, 92, 246, 0.25); z-index: 1;
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 50%, transparent), 0 0 24px color-mix(in srgb, var(--accent) 25%, transparent); z-index: 1;
 }
 .orbit-ring {
   position: absolute; inset: 0; border-radius: 50%;
   border: 1px solid transparent; opacity: 0.5;
 }
-.o-1 { border-color: rgba(139, 92, 246, 0.3); animation: orbit-spin 2.4s linear infinite; }
-.o-2 { inset: 8px; border-color: rgba(99, 102, 241, 0.25); animation: orbit-spin 1.8s linear infinite reverse; }
-.o-3 { inset: 16px; border-color: rgba(168, 85, 247, 0.2); animation: orbit-spin 3s linear infinite; }
+.o-1 { border-color: color-mix(in srgb, var(--accent) 30%, transparent); animation: orbit-spin 2.4s linear infinite; }
+.o-2 { inset: 8px; border-color: rgba(126, 226, 168, 0.25); animation: orbit-spin 1.8s linear infinite reverse; }
+.o-3 { inset: 16px; border-color: rgba(243, 189, 104, 0.2); animation: orbit-spin 3s linear infinite; }
 @keyframes orbit-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
 /* 树滚动区 */
@@ -530,10 +530,10 @@ function collapseRecursive(node: TreeNode) {
   transition: background 0.15s; border-radius: 0 6px 6px 0; margin-right: 8px;
 }
 .tree-row:hover { background: rgba(255,255,255,0.03); }
-.row-selected { background: rgba(139, 92, 246, 0.12) !important; }
+.row-selected { background: color-mix(in srgb, var(--accent) 12%, transparent) !important; }
 .row-selected::before {
   content: ''; position: absolute; left: 0; top: 50%; transform: translateY(-50%);
-  width: 3px; height: 18px; background: #a78bfa; border-radius: 0 2px 2px 0;
+  width: 3px; height: 18px; background: var(--accent); border-radius: 0 2px 2px 0;
 }
 .row-root { margin-top: 12px; }
 .row-root + .row-root { margin-top: 12px; }
@@ -550,7 +550,7 @@ function collapseRecursive(node: TreeNode) {
   display: inline-block; animation: spin 0.8s linear infinite; font-size: 10px;
 }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-.arrow-loading { color: #a78bfa; }
+.arrow-loading { color: var(--accent); }
 
 /* 图标 */
 .row-icon { font-size: 12px; flex-shrink: 0; width: 16px; text-align: center; }
@@ -638,4 +638,6 @@ function collapseRecursive(node: TreeNode) {
 .detail-panel::-webkit-scrollbar { width: 3px; }
 .detail-panel::-webkit-scrollbar-track { background: transparent; }
 .detail-panel::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.05); border-radius: 3px; }
+
+.tree-container { background: #08080b; }.search-bar, .toolbar { background: rgba(10, 10, 13, .94); border-color: var(--line); box-shadow: 0 12px 35px rgba(0,0,0,.25); }.search-bar:focus-within { border-color: var(--line-strong); box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 12%, transparent); }.search-input { color: var(--text); }.search-input::placeholder, .search-icon, .search-count, .toolbar-count { color: var(--muted); }.toolbar-btn { color: var(--muted); border-color: var(--line); }.toolbar-btn:hover { color: var(--accent); border-color: var(--line-strong); background: color-mix(in srgb, var(--accent) 6%, transparent); }.row-selected { background: color-mix(in srgb, var(--accent) 12%, transparent) !important; }.row-selected::before { background: var(--accent); }.row-name { color: #cfc6ad !important; }.detail-panel { background: rgba(10, 10, 13, .95); border-left-color: var(--line); }.panel-name { color: var(--text); }.panel-section-title { color: var(--dim); }.panel-fact, .panel-desc { color: var(--muted); background: color-mix(in srgb, var(--accent) 4%, transparent); border-color: var(--line); }.panel-close { color: var(--muted); background: color-mix(in srgb, var(--accent) 5%, transparent); border-color: var(--line); }.panel-close:hover { color: var(--accent); border-color: var(--line-strong); }
 </style>

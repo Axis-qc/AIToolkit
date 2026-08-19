@@ -7,6 +7,11 @@ async def search(query: str, top_k: int = 5) -> list[dict]:
     return await graph.search_entities(query, top_k)
 
 
+async def list_pinned() -> list[dict]:
+    """列出所有固定（pinned）注入的实体，按重要度降序，含完整字段。"""
+    return await graph.get_pinned_entities()
+
+
 async def get_entity(name: str) -> dict | None:
     """精准匹配读取单个实体的完整字段。"""
     return await graph.get_entity_detail(name)

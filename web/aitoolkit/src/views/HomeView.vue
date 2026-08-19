@@ -1,393 +1,87 @@
 <script setup lang="ts">
 import { RouterLink } from 'vue-router'
 
-interface FeatureCard {
-  title: string
-  description: string
-  icon: string
-  route: string
-  available: boolean
-  accent: string
-}
-
-const cards: FeatureCard[] = [
-  {
-    title: '知识图谱',
-    description: '可视化浏览知识图谱，力导向图与树形浏览双模式，探索实体关系网络。',
-    icon: '◈',
-    route: '/graph',
-    available: true,
-    accent: '#7c5cfc',
-  },
-  {
-    title: '网页工具',
-    description: '各类实用网页工具的集合，提升日常工作效率。',
-    icon: '⬡',
-    route: '/tools',
-    available: true,
-    accent: '#4da6d9',
-  },
-  {
-    title: '小游戏',
-    description: '闲暇时刻的放松之选，轻量有趣的网页小游戏。',
-    icon: '◆',
-    route: '/games',
-    available: false,
-    accent: '#f0a050',
-  },
-  {
-    title: '设置',
-    description: '系统配置与个性化设置，管理你的偏好与数据。',
-    icon: '◇',
-    route: '/settings',
-    available: true,
-    accent: '#6b7280',
-  },
+const modules = [
+  { code: 'PH', title: '手机监控', description: '实时查看设备资源、进程排行和历史采样趋势。', route: '/phone-monitor', accent: 'cyan', metric: '3s', metricLabel: '采样周期' },
+  { code: 'KG', title: '知识图谱', description: '检视实体关系、事实节点和记忆网络的结构。', route: '/graph', accent: 'violet', metric: 'LIVE', metricLabel: '图谱状态' },
+  { code: 'SK', title: '主题外观', description: '自由调整主色，系统自动派生整套界面配色。', route: '/settings', accent: 'amber', metric: 'LIVE', metricLabel: '实时预览' },
+  { code: 'TL', title: '工具中心', description: '集中放置日常使用的网页工具和快捷操作。', route: '/tools', accent: 'blue', metric: 'SOON', metricLabel: '模块状态' },
 ]
 </script>
 
 <template>
-  <div class="home">
-    <div class="bg-orbs">
-      <div class="orb orb-1"></div>
-      <div class="orb orb-2"></div>
-      <div class="orb orb-3"></div>
-    </div>
-
-    <div class="grid-overlay"></div>
-
-    <div class="content">
-      <header class="hero">
-        <div class="logo-mark">◈</div>
-        <h1 class="title">AI 工作台</h1>
-        <p class="subtitle">智能 · 高效 · 持续记忆</p>
-      </header>
-
-      <div class="card-grid">
-        <component
-          :is="card.available ? RouterLink : 'button'"
-          v-for="(card, i) in cards"
-          :key="card.title"
-          :to="card.available ? card.route : undefined"
-          :class="['card', { available: card.available }]"
-          :style="{ '--accent': card.accent, '--delay': `${i * 0.1}s` }"
-          :disabled="!card.available ? true : undefined"
-        >
-          <div class="card-icon" :style="{ background: `${card.accent}18` }">
-            <span :style="{ color: card.accent }">{{ card.icon }}</span>
-          </div>
-          <div class="card-body">
-            <div class="card-header">
-              <h3 class="card-title">{{ card.title }}</h3>
-              <span :class="['badge', card.available ? 'badge-on' : 'badge-off']">
-                {{ card.available ? '可用' : '开发中' }}
-              </span>
-            </div>
-            <p class="card-desc">{{ card.description }}</p>
-          </div>
-          <div v-if="card.available" class="card-arrow">→</div>
-        </component>
+  <div class="overview-page">
+    <section class="overview-hero panel-surface">
+      <div class="hero-copy">
+        <div class="section-kicker">SYSTEM OVERVIEW / 00</div>
+        <h2>本地工作台<br /><span>运行态势总览</span></h2>
+        <p>一处查看当前工具、设备与记忆系统的运行入口。数据优先，状态清晰，所有内容留在本地环境。</p>
+        <div class="hero-actions">
+          <RouterLink to="/phone-monitor" class="primary-action">打开手机监控 <span>→</span></RouterLink>
+          <span class="hero-note"><i></i> 本地节点已连接</span>
+        </div>
       </div>
+      <div class="hero-visual" aria-hidden="true">
+        <div class="radar-grid"></div>
+        <div class="radar-ring ring-a"></div>
+        <div class="radar-ring ring-b"></div>
+        <div class="radar-core"><span></span></div>
+        <div class="radar-label label-a">LOCAL / 01</div>
+        <div class="radar-label label-b">NODE ACTIVE</div>
+      </div>
+    </section>
 
-      <footer class="footer">
-        <span>v0.1.0 · 本地运行 · 数据由你掌控</span>
-      </footer>
-    </div>
+    <section class="overview-strip">
+      <div><span class="strip-label">当前环境</span><strong>AIToolkit Desktop</strong></div>
+      <div><span class="strip-label">数据策略</span><strong>LOCAL ONLY</strong></div>
+      <div><span class="strip-label">可用模块</span><strong>04 <em>/ 06</em></strong></div>
+      <div><span class="strip-label">系统时间</span><strong>{{ new Date().toLocaleDateString('zh-CN') }}</strong></div>
+    </section>
+
+    <section class="module-section">
+      <div class="section-heading">
+        <div><div class="section-kicker">MODULES / 01</div><h3>运行模块</h3></div>
+        <span class="heading-note">SELECT MODULE TO CONTINUE</span>
+      </div>
+      <div class="module-grid">
+        <RouterLink v-for="module in modules" :key="module.route" :to="module.route" :class="['module-card', `accent-${module.accent}`]">
+          <div class="module-card-top"><span class="module-code">{{ module.code }}</span><span class="module-arrow">↗</span></div>
+          <h4>{{ module.title }}</h4>
+          <p>{{ module.description }}</p>
+          <div class="module-card-foot"><span>{{ module.metricLabel }}</span><strong>{{ module.metric }}</strong></div>
+        </RouterLink>
+      </div>
+    </section>
   </div>
 </template>
 
-<style scoped>
-.home {
-  position: relative;
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #08080c;
-  overflow: hidden;
-  font-family: inherit;
-}
-
-/* ── Background Orbs ── */
-.bg-orbs {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(120px);
-  opacity: 0.25;
-  animation: orb-drift 20s ease-in-out infinite alternate;
-}
-
-.orb-1 {
-  width: 600px;
-  height: 600px;
-  background: radial-gradient(circle, #7c5cfc44, transparent 70%);
-  top: -15%;
-  left: -10%;
-  animation-delay: 0s;
-}
-
-.orb-2 {
-  width: 500px;
-  height: 500px;
-  background: radial-gradient(circle, #4da6d922, transparent 70%);
-  bottom: -20%;
-  right: -8%;
-  animation-delay: -7s;
-}
-
-.orb-3 {
-  width: 400px;
-  height: 400px;
-  background: radial-gradient(circle, #f0a05018, transparent 70%);
-  top: 50%;
-  left: 55%;
-  animation-delay: -14s;
-}
-
-@keyframes orb-drift {
-  0% { transform: translate(0, 0) scale(1); }
-  100% { transform: translate(40px, -30px) scale(1.15); }
-}
-
-/* ── Grid Overlay ── */
-.grid-overlay {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
-  background-size: 64px 64px;
-  pointer-events: none;
-  mask-image: radial-gradient(ellipse at center, black 30%, transparent 70%);
-}
-
-/* ── Content ── */
-.content {
-  position: relative;
-  z-index: 1;
-  width: 100%;
-  max-width: 960px;
-  padding: 2rem;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 3rem;
-}
-
-/* ── Hero ── */
-.hero {
-  text-align: center;
-  animation: fade-up 0.8s ease-out;
-}
-
-.logo-mark {
-  font-size: 2.5rem;
-  color: #7c5cfc;
-  margin-bottom: 0.5rem;
-  filter: drop-shadow(0 0 20px #7c5cfc44);
-}
-
-.title {
-  font-size: 2.8rem;
-  font-weight: 700;
-  color: #f0f0f3;
-  letter-spacing: -0.02em;
-  margin: 0;
-}
-
-.subtitle {
-  font-size: 1.05rem;
-  color: #6b6b80;
-  margin: 0.6rem 0 0;
-  letter-spacing: 0.15em;
-  font-weight: 400;
-}
-
-/* ── Card Grid ── */
-.card-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 1.25rem;
-  width: 100%;
-  animation: fade-up 0.8s ease-out 0.15s both;
-}
-
-@media (max-width: 640px) {
-  .card-grid {
-    grid-template-columns: 1fr;
-  }
-  .title {
-    font-size: 2rem;
-  }
-}
-
-/* ── Card ── */
-.card {
-  display: flex;
-  align-items: flex-start;
-  gap: 1rem;
-  padding: 1.5rem;
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 16px;
-  cursor: pointer;
-  transition: all 0.35s cubic-bezier(0.25, 0.1, 0.25, 1);
-  text-align: left;
-  text-decoration: none;
-  color: inherit;
-  font-family: inherit;
-  font-size: inherit;
-  position: relative;
-  overflow: hidden;
-  animation: fade-up 0.6s ease-out var(--delay) both;
-}
-
-.card::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 16px;
-  background: radial-gradient(600px circle at var(--mouse-x, 50%) var(--mouse-y, 50%), var(--accent)06, transparent 40%);
-  opacity: 0;
-  transition: opacity 0.4s;
-}
-
-.card:hover::before {
-  opacity: 1;
-}
-
-.card:hover {
-  border-color: rgba(255, 255, 255, 0.12);
-  transform: translateY(-2px);
-  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.4);
-}
-
-.card.available:hover {
-  border-color: var(--accent);
-  box-shadow:
-    0 8px 40px rgba(0, 0, 0, 0.5),
-    0 0 80px var(--accent)10;
-}
-
-button.card {
-  width: 100%;
-  cursor: default;
-  opacity: 0.55;
-}
-
-button.card:hover {
-  transform: none;
-  border-color: rgba(255, 255, 255, 0.06);
-  box-shadow: none;
-}
-
-/* ── Card Icon ── */
-.card-icon {
-  flex-shrink: 0;
-  width: 48px;
-  height: 48px;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1.4rem;
-  transition: transform 0.35s cubic-bezier(0.25, 0.1, 0.25, 1);
-}
-
-.available:hover .card-icon {
-  transform: scale(1.1);
-}
-
-/* ── Card Body ── */
-.card-body {
-  flex: 1;
-  min-width: 0;
-}
-
-.card-header {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  margin-bottom: 0.4rem;
-}
-
-.card-title {
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: #e0e0e8;
-  margin: 0;
-  white-space: nowrap;
-}
-
-.badge {
-  font-size: 0.7rem;
-  font-weight: 500;
-  padding: 2px 10px;
-  border-radius: 100px;
-  letter-spacing: 0.02em;
-}
-
-.badge-on {
-  background: #7c5cfc18;
-  color: #a78bfa;
-  border: 1px solid #7c5cfc33;
-}
-
-.badge-off {
-  background: rgba(255,255,255,0.04);
-  color: #5a5a6e;
-  border: 1px solid rgba(255,255,255,0.06);
-}
-
-.card-desc {
-  font-size: 0.9rem;
-  color: #6b6b80;
-  line-height: 1.55;
-  margin: 0;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-/* ── Card Arrow ── */
-.card-arrow {
-  flex-shrink: 0;
-  color: #444;
-  font-size: 1.1rem;
-  transition: all 0.35s;
-  align-self: center;
-}
-
-.available:hover .card-arrow {
-  color: var(--accent);
-  transform: translateX(4px);
-}
-
-/* ── Footer ── */
-.footer {
-  color: #3a3a4a;
-  font-size: 0.8rem;
-  letter-spacing: 0.04em;
-  animation: fade-up 0.8s ease-out 0.55s both;
-}
-
-/* ── Animations ── */
-@keyframes fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(24px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
+<style>
+.overview-page { max-width: 1280px; margin: 0 auto; padding-top: 28px; }
+.panel-surface { border: 1px solid var(--line); background: linear-gradient(120deg, rgba(22, 20, 12, 0.88), rgba(12, 11, 8, 0.74)); box-shadow: var(--shadow); }
+.overview-hero { min-height: 300px; display: flex; justify-content: space-between; gap: 32px; padding: 40px 44px; overflow: hidden; position: relative; }
+.overview-hero::after { content: ''; position: absolute; left: 0; bottom: 0; width: 46%; height: 2px; background: linear-gradient(90deg, var(--accent), transparent); }
+.hero-copy { position: relative; z-index: 1; max-width: 540px; }
+.section-kicker { color: var(--accent); font-family: Consolas, monospace; font-size: 10px; letter-spacing: .18em; }
+.hero-copy h2 { margin: 18px 0 14px; font-size: clamp(32px, 4vw, 52px); line-height: 1.05; font-weight: 650; letter-spacing: -.04em; }
+.hero-copy h2 span { color: #d8c890; }
+.hero-copy p { max-width: 470px; margin: 0; color: var(--muted); font-size: 14px; line-height: 1.75; }
+.hero-actions { display: flex; align-items: center; gap: 18px; margin-top: 28px; flex-wrap: wrap; }
+.primary-action { display: inline-flex; align-items: center; gap: 14px; padding: 11px 15px; border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); border-radius: 6px; color: var(--text); background: color-mix(in srgb, var(--accent) 13%, transparent); text-decoration: none; font-size: 12px; transition: 180ms ease; }
+.primary-action:hover { background: color-mix(in srgb, var(--accent) 23%, transparent); box-shadow: 0 0 26px color-mix(in srgb, var(--accent) 14%, transparent); }
+.primary-action span { color: var(--accent); font-size: 17px; }
+.hero-note { color: var(--muted); font-family: Consolas, monospace; font-size: 10px; }
+.hero-note i { display: inline-block; width: 6px; height: 6px; margin-right: 4px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
+.hero-visual { position: relative; width: 320px; min-width: 260px; height: 240px; margin: -5px -5px 0 0; opacity: .9; }
+.radar-grid { position: absolute; inset: 15px; border: 1px solid color-mix(in srgb, var(--accent) 14%, transparent); background-image: linear-gradient(color-mix(in srgb, var(--accent) 12%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, transparent) 1px, transparent 1px); background-size: 32px 32px; transform: perspective(360px) rotateX(55deg) rotateZ(-12deg); transform-origin: center bottom; }
+.radar-ring { position: absolute; left: 50%; top: 48%; transform: translate(-50%, -50%); border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent); border-radius: 50%; box-shadow: 0 0 36px color-mix(in srgb, var(--accent) 8%, transparent) inset; }
+.ring-a { width: 170px; height: 170px; }.ring-b { width: 94px; height: 94px; border-color: rgba(126, 226, 168, .42); }
+.radar-core { position: absolute; left: 50%; top: 48%; width: 18px; height: 18px; transform: translate(-50%, -50%); border: 1px solid var(--accent); border-radius: 50%; box-shadow: 0 0 30px color-mix(in srgb, var(--accent) 75%, transparent); }
+.radar-core span { display: block; width: 4px; height: 4px; margin: 6px; border-radius: 50%; background: var(--green); }
+.radar-label { position: absolute; color: var(--muted); font: 10px Consolas, monospace; letter-spacing: .1em; }.label-a { top: 20px; right: 12px; }.label-b { left: 5px; bottom: 32px; color: var(--green); }
+.overview-strip { display: grid; grid-template-columns: repeat(4, 1fr); margin-top: 16px; border: 1px solid var(--line); background: rgba(16, 14, 9, .6); }
+.overview-strip > div { padding: 14px 18px; border-right: 1px solid var(--line); }.overview-strip > div:last-child { border-right: 0; }.strip-label { display: block; margin-bottom: 6px; color: var(--dim); font: 10px Consolas, monospace; text-transform: uppercase; letter-spacing: .08em; }.overview-strip strong { color: #d8c890; font: 12px Consolas, monospace; }.overview-strip em { color: var(--dim); font-style: normal; }
+.module-section { padding: 32px 0; }.section-heading { display: flex; align-items: end; justify-content: space-between; margin-bottom: 13px; }.section-heading h3 { margin: 6px 0 0; font-size: 19px; font-weight: 600; }.heading-note { color: var(--dim); font: 10px Consolas, monospace; letter-spacing: .08em; }
+.module-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }.module-card { min-height: 190px; display: flex; flex-direction: column; padding: 18px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); text-decoration: none; background: rgba(17, 15, 9, .72); transition: 180ms ease; --card-accent: var(--accent); }.module-card:hover { transform: translateY(-3px); border-color: var(--card-accent); background: rgba(28, 24, 13, .85); box-shadow: 0 18px 40px rgba(0,0,0,.25); }.module-card-top { display: flex; justify-content: space-between; }.module-code { color: var(--card-accent); font: 11px Consolas, monospace; letter-spacing: .12em; }.module-arrow { color: var(--dim); }.module-card h4 { margin: 34px 0 8px; font-size: 17px; font-weight: 600; }.module-card p { min-height: 43px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }.module-card-foot { display: flex; justify-content: space-between; align-items: end; margin-top: auto; padding-top: 18px; border-top: 1px solid var(--line); color: var(--dim); font: 10px Consolas, monospace; }.module-card-foot strong { color: var(--card-accent); font-size: 12px; }.accent-cyan { --card-accent: var(--accent); }.accent-violet { --card-accent: var(--accent-bright); }.accent-amber { --card-accent: color-mix(in srgb, var(--accent) 72%, #ffffff 28%); }.accent-blue { --card-accent: var(--accent-deep); }
+@media (max-width: 960px) { .module-grid { grid-template-columns: repeat(2, 1fr); }.hero-visual { width: 250px; }.overview-hero { padding: 32px; } }
+@media (max-width: 650px) { .overview-page { padding-top: 18px; }.overview-hero { min-height: 0; padding: 26px 22px; }.hero-visual { display: none; }.overview-strip { grid-template-columns: repeat(2, 1fr); }.overview-strip > div:nth-child(2) { border-right: 0; }.overview-strip > div:nth-child(-n+2) { border-bottom: 1px solid var(--line); }.module-grid { grid-template-columns: 1fr; }.section-heading { align-items: start; gap: 8px; flex-direction: column; } }
 </style>

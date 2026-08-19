@@ -108,7 +108,7 @@ async function renderGraph() {
       .selectAll<SVGLineElement, SimLink>('line')
       .data(links)
       .join('line')
-      .attr('stroke', '#2a2a44')
+      .attr('stroke', '#3a3425')
       .attr('stroke-width', 1)
       .attr('stroke-opacity', 0.4)
 
@@ -118,7 +118,7 @@ async function renderGraph() {
       .data(links)
       .join('text')
       .text(d => d.rel_type)
-      .attr('fill', '#4a4a62')
+      .attr('fill', '#7a7263')
       .attr('font-size', 9)
       .attr('text-anchor', 'middle')
       .attr('dy', -4)
@@ -155,7 +155,7 @@ async function renderGraph() {
       .append('circle')
       .attr('r', d => 6 + Math.sqrt(d.importance || 1) * 4)
       .attr('fill', d => nodeColor(d.type))
-      .attr('stroke', '#080812')
+      .attr('stroke', '#0a0a0d')
       .attr('stroke-width', 2)
       .attr('opacity', 0.85)
       .style('transition', 'opacity 0.2s')
@@ -166,7 +166,7 @@ async function renderGraph() {
       .text(d => d.name.length > 15 ? d.name.slice(0, 15) + '…' : d.name)
       .attr('dx', d => 12 + Math.sqrt(d.importance || 1) * 4)
       .attr('dy', 4)
-      .attr('fill', '#b0b0c8')
+      .attr('fill', '#cfc6ad')
       .attr('font-size', d => Math.min(13, 10 + Math.sqrt(d.importance || 1) * 1.5))
       .attr('font-weight', d => d.importance >= 8 ? '600' : '400')
       .style('pointer-events', 'none')
@@ -380,7 +380,7 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   position: relative;
-  background: #080812;
+  background: #08080b;
   overflow: hidden;
 }
 
@@ -406,16 +406,16 @@ onUnmounted(() => {
   display: flex; align-items: center; justify-content: center;
 }
 .orbit-core {
-  width: 6px; height: 6px; border-radius: 50%; background: #a78bfa;
-  box-shadow: 0 0 12px rgba(139, 92, 246, 0.5), 0 0 24px rgba(139, 92, 246, 0.25); z-index: 1;
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 50%, transparent), 0 0 24px color-mix(in srgb, var(--accent) 25%, transparent); z-index: 1;
 }
 .orbit-ring {
   position: absolute; inset: 0; border-radius: 50%;
   border: 1px solid transparent; opacity: 0.5;
 }
-.o-1 { border-color: rgba(139, 92, 246, 0.3); animation: orbit-spin 2.4s linear infinite; }
-.o-2 { inset: 8px; border-color: rgba(99, 102, 241, 0.25); animation: orbit-spin 1.8s linear infinite reverse; }
-.o-3 { inset: 16px; border-color: rgba(168, 85, 247, 0.2); animation: orbit-spin 3s linear infinite; }
+.o-1 { border-color: color-mix(in srgb, var(--accent) 30%, transparent); animation: orbit-spin 2.4s linear infinite; }
+.o-2 { inset: 8px; border-color: rgba(126, 226, 168, 0.25); animation: orbit-spin 1.8s linear infinite reverse; }
+.o-3 { inset: 16px; border-color: rgba(243, 189, 104, 0.2); animation: orbit-spin 3s linear infinite; }
 @keyframes orbit-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
 /* 底部提示 */
@@ -494,4 +494,6 @@ onUnmounted(() => {
 .detail-panel::-webkit-scrollbar { width: 3px; }
 .detail-panel::-webkit-scrollbar-track { background: transparent; }
 .detail-panel::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.05); border-radius: 3px; }
+
+.force-container { background: #08080b; }.force-status { color: var(--muted); }.orbit-core { background: var(--accent); box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 60%, transparent), 0 0 24px color-mix(in srgb, var(--accent) 24%, transparent); }.o-1 { border-color: color-mix(in srgb, var(--accent) 32%, transparent); }.o-2 { border-color: rgba(126,226,168,.24); }.o-3 { border-color: rgba(243,189,104,.2); }.force-count, .tree-hint { color: var(--muted); background: rgba(10, 10, 13, .84); border-color: var(--line); }.detail-panel { background: rgba(10, 10, 13, .95); border-left-color: var(--line); }.panel-name { color: var(--text); }.panel-section-title { color: var(--dim); }.panel-fact, .panel-desc { color: var(--muted); background: color-mix(in srgb, var(--accent) 4%, transparent); border-color: var(--line); }.panel-close { color: var(--muted); background: color-mix(in srgb, var(--accent) 5%, transparent); border-color: var(--line); }.panel-close:hover { color: var(--accent); border-color: var(--line-strong); }
 </style>

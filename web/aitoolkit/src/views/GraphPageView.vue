@@ -20,7 +20,7 @@ import GraphView from '@/components/graph/GraphView.vue'
   width: 100%;
   height: 100%;
   position: relative;
-  background: #080812;
+  background: #08080b;
 }
 
 .back-btn {
@@ -55,4 +55,8 @@ import GraphView from '@/components/graph/GraphView.vue'
   height: 16px;
   flex-shrink: 0;
 }
+
+.graph-page { background: #08080b; }
+.back-btn { top: 16px; left: 18px; color: var(--muted); background: rgba(10, 10, 13, .92); border-color: var(--line); }
+.back-btn:hover { color: var(--accent); border-color: var(--line-strong); background: rgba(24, 20, 10, .95); }
 </style>

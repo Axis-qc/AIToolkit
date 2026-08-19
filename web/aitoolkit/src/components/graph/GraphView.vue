@@ -55,7 +55,7 @@ function toggleMode() {
   width: 100%;
   height: 100%;
   position: relative;
-  background: #080812;
+  background: #08080b;
 }
 
 .view-switcher {
@@ -95,8 +95,8 @@ function toggleMode() {
 }
 
 .sw-btn.active {
-  color: #d0d0e0;
-  background: rgba(139, 92, 246, 0.2);
+  color: #f5efdf;
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
@@ -104,4 +104,8 @@ function toggleMode() {
   width: 100%;
   height: 100%;
 }
+
+.graph-view { background: #08080b; }
+.view-switcher { background: rgba(10, 10, 13, .92); border-color: var(--line); box-shadow: 0 12px 35px rgba(0,0,0,.25); }
+.sw-btn { color: var(--muted); }.sw-btn:hover { color: var(--text); background: color-mix(in srgb, var(--accent) 8%, transparent); }.sw-btn.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 0 0 0 1px var(--line-strong); }
 </style>
