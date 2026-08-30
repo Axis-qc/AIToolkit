@@ -11,16 +11,18 @@ function toggleSidebar() {
 
 const navItems = [
   { to: '/', label: '总览', key: 'overview' },
-  { to: '/phone-monitor', label: '手机监控', key: 'phone' },
   { to: '/graph', label: '知识图谱', key: 'graph' },
   { to: '/tools', label: '网页工具', key: 'tools' },
+  { to: '/mc-panel', label: 'MC 面板', key: 'mc' },
   { to: '/games', label: '小游戏', key: 'games' },
 ]
 
 const pageTitle = computed(() => {
-  if (route.name === 'phone-monitor') return '手机运行态势'
   if (route.name === 'graph') return '知识图谱'
   if (route.name === 'tools') return '工具中心'
+  if (route.name === 'mc-panel') return 'MC 面板'
+  if (route.name === 'colony-idle') return '殖民地放置'
+  if (route.name === 'voxel4x') return '体素四叉'
   if (route.name === 'games') return '休闲模块'
   if (route.name === 'settings') return '系统设置'
   return '运行总览'
@@ -61,14 +63,14 @@ const pageTitle = computed(() => {
             <template v-if="item.key === 'overview'">
               <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
             </template>
-            <template v-else-if="item.key === 'phone'">
-              <rect x="7" y="2.5" width="10" height="19" rx="2" /><path d="M10 5h4M11 18.5h2" />
-            </template>
             <template v-else-if="item.key === 'graph'">
               <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="12" cy="18" r="2.5" /><path d="m8.2 7.3 2.2 8M15.8 7.3l-2.2 8M8.5 6h7" />
             </template>
             <template v-else-if="item.key === 'tools'">
               <path d="m14.7 6.3 3-3 3 3-3 3M4 20l9.7-9.7M13.5 4.5a4.4 4.4 0 0 0-5.7 5.7L3 15v5h5l4.8-4.8a4.4 4.4 0 0 0 5.7-5.7" />
+            </template>
+            <template v-else-if="item.key === 'mc'">
+              <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M7 9h2M7 13h2M15 9h2M15 13h2" />
             </template>
             <template v-else>
               <path d="M4 8h16M6 5h.01M10 5h.01M14 5h.01M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M9 12h6M9 16h4" />

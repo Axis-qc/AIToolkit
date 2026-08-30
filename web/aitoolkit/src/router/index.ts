@@ -20,14 +20,24 @@ const router = createRouter({
       component: () => import('@/views/ToolsView.vue'),
     },
     {
-      path: '/phone-monitor',
-      name: 'phone-monitor',
-      component: () => import('@/views/PhoneMonitorView.vue'),
+      path: '/mc-panel',
+      name: 'mc-panel',
+      component: () => import('@/views/McPanelView.vue'),
     },
     {
       path: '/games',
       name: 'games',
       component: () => import('@/views/GamesView.vue'),
+    },
+    {
+      path: '/games/colony-idle',
+      name: 'colony-idle',
+      component: () => import('@/games/colonyIdle/ColonyIdleView.vue'),
+    },
+    {
+      path: '/games/voxel4x',
+      name: 'voxel4x',
+      component: () => import('@/games/voxel4x/Voxel4xView.vue'),
     },
     {
       path: '/settings',

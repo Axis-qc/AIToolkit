@@ -2,7 +2,7 @@
 import { RouterLink } from 'vue-router'
 
 const modules = [
-  { code: 'PH', title: '手机监控', description: '实时查看设备资源、进程排行和历史采样趋势。', route: '/phone-monitor', accent: 'cyan', metric: '3s', metricLabel: '采样周期' },
+  { code: 'MC', title: 'MC 面板', description: '服务器控制台与宿主设备负载监控。', route: '/mc-panel', accent: 'cyan', metric: 'LIVE', metricLabel: '面板状态' },
   { code: 'KG', title: '知识图谱', description: '检视实体关系、事实节点和记忆网络的结构。', route: '/graph', accent: 'violet', metric: 'LIVE', metricLabel: '图谱状态' },
   { code: 'SK', title: '主题外观', description: '自由调整主色，系统自动派生整套界面配色。', route: '/settings', accent: 'amber', metric: 'LIVE', metricLabel: '实时预览' },
   { code: 'TL', title: '工具中心', description: '集中放置日常使用的网页工具和快捷操作。', route: '/tools', accent: 'blue', metric: 'SOON', metricLabel: '模块状态' },
@@ -17,7 +17,7 @@ const modules = [
         <h2>本地工作台<br /><span>运行态势总览</span></h2>
         <p>一处查看当前工具、设备与记忆系统的运行入口。数据优先，状态清晰，所有内容留在本地环境。</p>
         <div class="hero-actions">
-          <RouterLink to="/phone-monitor" class="primary-action">打开手机监控 <span>→</span></RouterLink>
+          <RouterLink to="/mc-panel" class="primary-action">打开 MC 面板 <span>→</span></RouterLink>
           <span class="hero-note"><i></i> 本地节点已连接</span>
         </div>
       </div>
