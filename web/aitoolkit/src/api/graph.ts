@@ -4,10 +4,14 @@ export interface GraphNode {
   type: string
   importance?: number
   pinned?: boolean
+  /** 是否为根实体（is_root=1），关系网用于绘制层级顶端标记。 */
+  is_root?: boolean
 }
 
 export interface GraphEdge {
+  /** 子节点 id（关系方向：子 → 父） */
   source: string
+  /** 父节点 id */
   target: string
   rel_type: string
 }
@@ -23,7 +27,8 @@ export interface GraphFact {
 export interface GraphData {
   nodes: GraphNode[]
   edges: GraphEdge[]
-  facts: GraphFact[]
+  /** 全量接口不再返回 facts，事实详情按实体查询。 */
+  facts?: GraphFact[]
 }
 
 export async function fetchFullGraph(): Promise<GraphData> {

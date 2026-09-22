@@ -155,17 +155,20 @@ async def get_orphans() -> dict:
 
 
 async def get_full_graph() -> dict:
-    """获取全量图谱数据（所有活跃节点 + 边 + 事实数量）。
-    返回: { "nodes": [...], "edges": [...], "facts": [...] }
+    """获取全量图谱数据（所有活跃节点 + 边）。
+
+    返回: { "nodes": [...], "edges": [...] }
+    不返回 facts：事实详情由 /api/graph/facts 按实体单独查询，
+    全量事实会给每次响应增加近 300KB 而力导向图并不使用。
     """
     db = await _connect()
 
     # 所有活跃实体
     cur = await db.execute(
-        "SELECT name, type, importance, pinned FROM entities WHERE deprecated_at IS NULL ORDER BY importance DESC"
+        "SELECT name, type, importance, pinned, is_root FROM entities "
+        "WHERE deprecated_at IS NULL ORDER BY importance DESC"
     )
     nodes = []
-    entity_names = []
     for r in await cur.fetchall():
         nodes.append({
             "id": f"{r['type']}|{r['name']}",
@@ -173,8 +176,8 @@ async def get_full_graph() -> dict:
             "type": r["type"],
             "importance": r["importance"],
             "pinned": bool(r["pinned"]),
+            "is_root": bool(r["is_root"]),
         })
-        entity_names.append(r["name"])
 
     # 所有活跃关系
     cur = await db.execute("""
@@ -193,19 +196,4 @@ async def get_full_graph() -> dict:
             "rel_type": r["rel_type"],
         })
 
-    # 所有活跃事实（限制条数，避免过大）
-    cur = await db.execute(
-        "SELECT id, content, type, about_entities, ts FROM facts "
-        "WHERE deprecated_at IS NULL ORDER BY ts DESC LIMIT 500"
-    )
-    facts = []
-    for r in await cur.fetchall():
-        facts.append({
-            "id": r["id"],
-            "content": r["content"],
-            "type": r["type"],
-            "about_entities": json.loads(r["about_entities"]),
-            "ts": r["ts"],
-        })
-
-    return {"nodes": nodes, "edges": edges, "facts": facts}
+    return {"nodes": nodes, "edges": edges}

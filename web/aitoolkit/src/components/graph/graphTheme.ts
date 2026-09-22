@@ -64,6 +64,35 @@ export function typeLabel(type: string): string {
   return TYPE_LABELS[type] || type
 }
 
+/** 图例条目：某类型及其节点数量。 */
+export interface TypeLegendEntry {
+  type: string
+  label: string
+  color: string
+  count: number
+}
+
+/**
+ * 按出现次数降序汇总类型，供筛选面板与图例使用。
+ * 未知类型同样进入结果，颜色由 nodeColor 的哈希回退保证可区分。
+ */
+export function buildTypeLegend(types: string[]): TypeLegendEntry[] {
+  const counts = new Map<string, number>()
+  for (const type of types) {
+    const key = type.trim() || '未分类'
+    counts.set(key, (counts.get(key) || 0) + 1)
+  }
+  const entries: TypeLegendEntry[] = []
+  for (const [type, count] of counts) {
+    entries.push({ type, label: typeLabel(type), color: nodeColor(type), count })
+  }
+  entries.sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count
+    return a.type.localeCompare(b.type)
+  })
+  return entries
+}
+
 const HIERARCHY_RELATIONS = new Set([
   'parent', 'parent_of', 'has_parent', 'child', 'child_of', 'has_child',
   'contains', 'contain', 'includes', 'include', 'belongs_to', 'part_of',

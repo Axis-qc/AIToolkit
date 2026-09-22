@@ -40,8 +40,26 @@ AIToolkit/
     ├── vite.config.ts          # proxy /api → 127.0.0.1:18000
     └── src/
         ├── api/graph.ts        # 图谱 API 客户端
-        └── components/graph/   # 图谱可视化组件
+        └── components/graph/   # 图谱可视化（力导向关系网，Canvas 单层渲染）
+            ├── GraphView.vue        # 编排：视口状态、交互、面板开关
+            ├── GraphDetailPanel.vue # 实体详情（双击节点打开）
+            ├── GraphFilterPanel.vue # 类型与重要度筛选
+            ├── GraphSearchBox.vue   # 搜索定位（Ctrl+F）
+            ├── graphTheme.ts        # 类型配色、图例汇总、层级关系判定
+            └── layout/              # 渲染引擎，零第三方依赖
+                ├── forceSim.ts      # 力导向内核（斥力/弹簧/向心 + 退火）
+                ├── quadtree.ts      # Barnes-Hut 四叉树，斥力 O(n log n)
+                ├── labels.ts        # 标签分级与矩形避让
+                └── renderer.ts      # Canvas 绘制与视口裁剪
 ```
+
+## 图谱可视化约定
+- 交互分层：悬停只改光标形状，不做任何高亮或淡化；单击用于拖拽；双击才进入重点显示（高亮一跳邻域与关联边、打开详情面板）
+- 布局参数经真实数据（622 节点 / 898 边）实测选定，调参须复验：节点视觉重叠为 0、各筛选阈值下弹簧力方向正常、单帧耗时远低于 16.7ms
+- 弹簧力的距离上限只与理想边长挂钩，绝不与节点数挂钩，否则筛选到少量节点时弹簧力会整体反转成推远（详见 BUGLOG.md 第 10 条）
+- 力导向图按度数衰减弹簧强度、按度数加权向心力，孤立节点自然落在外围，不做单独处理
+- `/api/graph` 只返回 nodes 与 edges；事实详情由 `/api/graph/facts` 按实体查询
+- 筛选后重建布局沿用已有坐标，避免整张图跳变
 
 ## 架构约定
 - 知识图谱记忆 = MCP 工具（function call），非外部 pipeline

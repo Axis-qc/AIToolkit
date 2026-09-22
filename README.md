@@ -307,11 +307,13 @@ AIToolkit/
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/graph` | 全量图谱（节点+边+事实） |
+| GET | `/api/graph` | 全量图谱（节点+边，含 is_root 标记；不含事实） |
 | GET | `/api/graph/roots` | 根实体列表（is_root=1） |
 | GET | `/api/graph/children?type=&name=` | 子节点 |
 | GET | `/api/graph/facts?type=&name=` | 实体关联事实 |
 | GET | `/api/graph/orphans` | 无关联的孤岛实体 |
+
+`/api/graph` 只返回 `nodes` 与 `edges`。事实详情改由 `/api/graph/facts` 按实体单独查询，此前全量接口附带的 500 条事实约占每次响应 300KB，而力导向图并不使用。
 
 ### 图谱工具调用（REST）
 
