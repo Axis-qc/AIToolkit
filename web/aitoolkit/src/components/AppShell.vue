@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { RouterLink, useRoute } from 'vue-router'
+import { ref } from 'vue'
+import { RouterLink } from 'vue-router'
 
-const route = useRoute()
 const collapsed = ref(true)
 
 function toggleSidebar() {
@@ -16,17 +15,6 @@ const navItems = [
   { to: '/mc-panel', label: 'MC 面板', key: 'mc' },
   { to: '/games', label: '小游戏', key: 'games' },
 ]
-
-const pageTitle = computed(() => {
-  if (route.name === 'graph') return '知识图谱'
-  if (route.name === 'tools') return '工具中心'
-  if (route.name === 'mc-panel') return 'MC 面板'
-  if (route.name === 'colony-idle') return '殖民地放置'
-  if (route.name === 'voxel4x') return '体素四叉'
-  if (route.name === 'games') return '休闲模块'
-  if (route.name === 'settings') return '系统设置'
-  return '运行总览'
-})
 </script>
 
 <template>
@@ -94,18 +82,6 @@ const pageTitle = computed(() => {
     </aside>
 
     <section class="app-main">
-      <header class="app-topbar">
-        <div>
-          <div class="topbar-kicker">AITK / OBSERVABILITY</div>
-          <h1>{{ pageTitle }}</h1>
-        </div>
-        <div class="topbar-meta">
-          <span class="live-dot"></span>
-          <span>LOCAL ENVIRONMENT</span>
-          <span class="meta-separator">·</span>
-          <span>{{ new Date().toLocaleTimeString('zh-CN', { hour12: false }) }}</span>
-        </div>
-      </header>
       <main class="app-content">
         <slot />
       </main>

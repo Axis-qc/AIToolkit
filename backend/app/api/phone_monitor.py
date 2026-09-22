@@ -82,6 +82,7 @@ PHONE_USER = _env_or("PHONE_USER")
 PHONE_PASS = _env_or("PHONE_PASS")
 POLL_INTERVAL = _env_or_float("PHONE_POLL_INTERVAL", 3.0)
 HIST_MAX = 200
+SERIES_KEEP = 29000  # 24h 全量时间戳采样环（按条数封顶，3s 采样 ≈ 24h）
 
 router = APIRouter(prefix="/api/phone", tags=["phone-monitor"])
 
@@ -91,6 +92,7 @@ _state = {
     "err": "",
     "cpu_hist": deque(maxlen=HIST_MAX),
     "mem_hist": deque(maxlen=HIST_MAX),
+    "series": [],          # 24h 全量时间戳采样 [(ts,cpu,mem_avail,swap_total,swap_free,disk_used,disk_total,rx,tx)]
     "last_stat": None,     # 上一次 /proc/stat 每核 (idle, total)，用于差分
     "started": False,
 }
@@ -275,6 +277,59 @@ def _poll_once():
     d["cpu_sum_raw"] = raw_sum
     if cpu_pct is not None:
         _state["cpu_hist"].append(cpu_pct)
+    # 24h 全量时间戳采样（前端折线图 / 悬停时间段记录）；手机无网络计数器，rx/tx 为 None
+    m = d.get("mem") or {}
+    disk_used = sum((x.get("used") or 0) for x in d.get("disk", []))
+    disk_total = sum((x.get("total") or 0) for x in d.get("disk", []))
+    _state["series"].append((
+        d.get("ts", int(time.time())), cpu_pct, m.get("MemAvailable"),
+        m.get("SwapTotal") or 0, m.get("SwapFree") or 0,
+        disk_used, disk_total, None, None,
+    ))
+    if len(_state["series"]) > SERIES_KEEP:
+        del _state["series"][: len(_state["series"]) - SERIES_KEEP]
+
+
+def _tuple_to_dict(s):
+    """采样元组 → 前端 JSON 字典。"""
+    return {
+        "ts": s[0], "cpu": s[1], "mem_avail": s[2],
+        "swap_total": s[3], "swap_free": s[4],
+        "disk_used": s[5], "disk_total": s[6],
+        "rx": s[7], "tx": s[8],
+    }
+
+
+def _series_dicts(samples, from_ts, to_ts, max_points):
+    """取 [from_ts, to_ts] 区间采样，降采样到最多 max_points 点（分桶均值）。"""
+    pts = [s for s in samples if from_ts <= s[0] <= to_ts]
+    n = len(pts)
+    if n == 0:
+        return []
+    if n <= max_points:
+        return [_tuple_to_dict(s) for s in pts]
+    bucket = n / max_points
+    out = []
+    for i in range(max_points):
+        lo = int(i * bucket)
+        hi = max(lo + 1, int((i + 1) * bucket))
+        chunk = pts[lo:hi]
+
+        def avg(idx):
+            vals = [c[idx] for c in chunk if c[idx] is not None]
+            return round(sum(vals) / len(vals), 2) if vals else None
+
+        d = _tuple_to_dict(chunk[-1])
+        d["cpu"] = avg(1)
+        d["mem_avail"] = avg(2)
+        d["swap_total"] = avg(3)
+        d["swap_free"] = avg(4)
+        d["disk_used"] = avg(5)
+        d["disk_total"] = avg(6)
+        d["rx"] = avg(7)
+        d["tx"] = avg(8)
+        out.append(d)
+    return out
 
 
 def poll_loop():
@@ -325,3 +380,12 @@ async def phone_status():
             "mem": list(_state["mem_hist"]),
         },
     }
+
+
+@router.get("/series")
+async def phone_series(start: int = 0, end: int = 0, limit: int = 900):
+    """时间窗历史采样（自动降采样），供前端折线图缩放/平移按需拉取。"""
+    now = int(time.time())
+    s0 = start or now - 86400
+    s1 = end or now
+    return {"series": _series_dicts(_state["series"], s0, s1, max(50, min(limit, 1200)))}

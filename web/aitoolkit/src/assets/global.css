@@ -122,7 +122,7 @@ button, a, select {
 .brand-mark i:nth-child(3) { height: 25px; opacity: 0.78; }
 .brand-copy { display: grid; gap: 2px; }
 .brand-copy strong { font-size: 19px; letter-spacing: 0.12em; background: linear-gradient(90deg, var(--accent-bright), var(--accent) 55%, var(--accent-deep)); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.brand-copy small, .sidebar-label, .sidebar-foot, .topbar-kicker { color: var(--muted); font-size: 10px; letter-spacing: 0.16em; }
+.brand-copy small, .sidebar-label, .sidebar-foot { color: var(--muted); font-size: 10px; letter-spacing: 0.16em; }
 .sidebar-label { padding: 0 10px 10px; }
 .app-nav { display: grid; gap: 4px; }
 .app-nav-item { display: flex; align-items: center; gap: 11px; min-height: 42px; padding: 0 10px; border: 1px solid transparent; border-radius: 8px; color: var(--muted); text-decoration: none; font-size: 13px; letter-spacing: .02em; transition: 180ms ease; }
@@ -141,11 +141,7 @@ button, a, select {
 .sidebar-foot { padding: 0 8px; color: var(--dim); font-size: 9px; }
 .sidebar-foot span { margin: 0 4px; color: var(--line-strong); }
 .app-main { position: relative; z-index: 1; min-width: 0; max-width: 100%; min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-.app-topbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding: 26px 34px 20px; border-bottom: 1px solid color-mix(in srgb, var(--accent) 10%, transparent); }
-.app-topbar h1 { margin: 5px 0 0; color: var(--text); font-size: 23px; font-weight: 650; letter-spacing: 0.02em; }
-.topbar-meta { display: flex; align-items: center; gap: 8px; color: var(--muted); font-family: Consolas, monospace; font-size: 10px; letter-spacing: 0.08em; white-space: nowrap; }
-.meta-separator { color: var(--line-strong); }
-.app-content { width: 100%; min-width: 0; max-width: 100%; min-height: 0; flex: 1; padding: 0 34px 34px; overflow-x: hidden; overflow-y: auto; }
+.app-content { width: 100%; min-width: 0; max-width: 100%; min-height: 0; flex: 1; padding: 18px 34px 34px; overflow-x: hidden; overflow-y: auto; }
 .app-content:has(.graph-page) { padding: 0; }
 .app-content:has(.monitor) { padding-bottom: 0; }
 
@@ -183,9 +179,5 @@ button, a, select {
   .app-nav { display: flex; overflow-x: auto; gap: 5px; padding-bottom: 1px; }
   .app-nav-item { flex: 0 0 auto; min-height: 36px; padding: 0 9px; }
   .nav-arrow { display: none; }
-  .app-topbar { align-items: flex-start; padding: 20px 18px 15px; }
-  .app-topbar h1 { font-size: 19px; }
-  .topbar-meta { padding-top: 4px; font-size: 9px; }
-  .topbar-meta span:nth-last-child(-n+2) { display: none; }
-  .app-content { padding: 0 18px 24px; }
+  .app-content { padding: 14px 18px 24px; }
 }

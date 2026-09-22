@@ -27,6 +27,8 @@ export interface PhoneStatus {
   cores?: number[] | null
   cpu_src?: 'stat' | 'ps' | null
   cpu_sum_raw?: number | null
+  rx_kb_s?: number | null
+  tx_kb_s?: number | null
   hist: { cpu: number[]; mem: number[] }
 }
 

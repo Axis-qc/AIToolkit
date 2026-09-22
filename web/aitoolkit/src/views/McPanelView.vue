@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, computed } from 'vue'
+import { onMounted, onBeforeUnmount, ref, computed, watch } from 'vue'
+import LineChart from '@/components/LineChart.vue'
 import { fetchPhoneStatus, type PhoneStatus, type PhoneProc, type PhoneDisk } from '@/api/phoneMonitor'
+import { fetchWinStatus } from '@/api/winMonitor'
 import { mcAuth, mcLogout, fetchMcStatus, sendMcCommand } from '@/api/mcConsole'
 
 /* ================= 认证门 ================= */
@@ -80,6 +82,17 @@ async function runStop() {
   await runCmd('stop')
 }
 
+/* ================= 服务器数据源切换（手机 / Windows 新服务器） ================= */
+const monitorSource = ref<'phone' | 'win'>('win')
+
+function switchSource(src: 'phone' | 'win') {
+  if (monitorSource.value === src) return
+  monitorSource.value = src
+  resetCharts()
+  tick()
+  fetchSeries()
+}
+
 /* ================= 手机负载监控（沿用原页面逻辑） ================= */
 const data = ref<PhoneStatus | null>(null)
 const loading = ref(true)
@@ -88,10 +101,200 @@ const fresh = ref<number | null>(null) // 距上次成功采样秒数
 let timer: number | undefined
 let freshTimer: number | undefined
 
+/* ================= 折线图（24h 历史 / 悬停时间段 / 滚轮缩放，四图共享窗口） ================= */
+interface ChartPoint {
+  ts: number
+  [k: string]: number | null
+}
+type ChartSeries = Array<{ key: string; label: string; color: string; unit: string; digits?: number }>
+
+interface RawPoint {
+  ts: number
+  cpu: number | null
+  mem_avail: number | null
+  swap_total: number
+  swap_free: number
+  disk_used: number
+  disk_total: number
+  rx: number | null
+  tx: number | null
+}
+
+const rawByTs = new Map<number, RawPoint>()
+const history = ref<RawPoint[]>([])
+let hasOverview = false
+let lastFetch = { from: 0, to: 0 }
+
+// 时间窗口（四张图共享，同步缩放/平移）
+const spanMs = ref(5 * 60_000)
+const followLive = ref(true)
+const fixedT0 = ref(0)
+const fixedT1 = ref(0)
+const nowTick = ref(Date.now())
+const t0 = computed(() => (followLive.value ? nowTick.value - spanMs.value : fixedT0.value))
+const t1 = computed(() => (followLive.value ? nowTick.value : fixedT1.value))
+
+const cpuSeries: ChartSeries = [{ key: 'cpu', label: 'CPU', color: '#f59e0b', unit: '%', digits: 0 }]
+const memSeries: ChartSeries = [{ key: 'memPct', label: '内存', color: '#34d399', unit: '%', digits: 0 }]
+const swapSeries: ChartSeries = [{ key: 'swapPct', label: 'Swap', color: '#fbbf24', unit: '%', digits: 0 }]
+const netSeries: ChartSeries = [
+  { key: 'rx', label: '入站', color: '#38bdf8', unit: 'KB/s', digits: 0 },
+  { key: 'tx', label: '出站', color: '#a78bfa', unit: 'KB/s', digits: 0 },
+]
+
+function normPoint(p: Record<string, unknown>): RawPoint {
+  return {
+    ts: (Number(p.ts) || 0) * 1000, // 后端 ts 为秒，统一为毫秒
+    cpu: (p.cpu as number | null) ?? null,
+    mem_avail: (p.mem_avail as number | null) ?? null,
+    swap_total: Number(p.swap_total) || 0,
+    swap_free: Number(p.swap_free) || 0,
+    disk_used: Number(p.disk_used) || 0,
+    disk_total: Number(p.disk_total) || 0,
+    rx: (p.rx as number | null) ?? null,
+    tx: (p.tx as number | null) ?? null,
+  }
+}
+
+function rebuildChart() {
+  const cutoff = Date.now() - 25 * 3600_000
+  for (const ts of rawByTs.keys()) {
+    if (ts < cutoff) rawByTs.delete(ts)
+  }
+  history.value = [...rawByTs.values()].sort((a, b) => a.ts - b.ts)
+}
+
+function appendLivePoint(d: PhoneStatus) {
+  if (!d || !d.ts) return
+  const m = d.mem || {}
+  const du = (d.disk || []).reduce((s, x) => s + (x.used || 0), 0)
+  const dt = (d.disk || []).reduce((s, x) => s + (x.total || 0), 0)
+  rawByTs.set(d.ts * 1000, {
+    ts: d.ts * 1000,
+    cpu: d.cpu ?? null,
+    mem_avail: m.MemAvailable ?? null,
+    swap_total: m.SwapTotal || 0,
+    swap_free: m.SwapFree || 0,
+    disk_used: du,
+    disk_total: dt,
+    rx: d.rx_kb_s ?? null,
+    tx: d.tx_kb_s ?? null,
+  })
+  rebuildChart()
+}
+
+async function fetchSeries() {
+  const now = Date.now()
+  let from: number
+  let to: number
+  if (followLive.value && spanMs.value >= 10 * 60_000) {
+    if (hasOverview) return
+    from = now - 86400_000
+    to = now
+  } else {
+    const pad = Math.max(spanMs.value * 0.1, 10_000)
+    if (followLive.value) {
+      from = now - spanMs.value * 3
+      to = now + 10_000
+    } else {
+      from = fixedT0.value - pad
+      to = fixedT1.value + pad
+    }
+    if (
+      lastFetch.from !== 0 &&
+      Math.abs(from - lastFetch.from) < spanMs.value * 0.5 &&
+      Math.abs(to - lastFetch.to) < 60_000
+    )
+      return
+  }
+  lastFetch = { from, to }
+  if (followLive.value && spanMs.value >= 10 * 60_000) hasOverview = true
+  try {
+    const res = await fetch(
+      `/api/${monitorSource.value}/series?start=${Math.round(from / 1000)}&end=${Math.round(to / 1000)}&limit=900`,
+      { cache: 'no-store' },
+    )
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const j = (await res.json()) as { series?: Record<string, unknown>[] }
+    for (const p of j.series || []) {
+      const rp = normPoint(p)
+      if (rp.ts) rawByTs.set(rp.ts, rp)
+    }
+    rebuildChart()
+  } catch {
+    /* 拉取失败保持现有数据 */
+  }
+}
+
+function onViewport(v: { t0: number; t1: number }) {
+  const now = Date.now()
+  if (v.t1 >= now - 2000) {
+    followLive.value = true
+    spanMs.value = Math.max(30_000, Math.min(26 * 3600_000, v.t1 - v.t0))
+  } else {
+    followLive.value = false
+    fixedT0.value = v.t0
+    fixedT1.value = v.t1
+  }
+}
+
+function resetLive() {
+  followLive.value = true
+  spanMs.value = 5 * 60_000
+  nowTick.value = Date.now()
+}
+
+function resetCharts() {
+  rawByTs.clear()
+  history.value = []
+  hasOverview = false
+  lastFetch = { from: 0, to: 0 }
+  followLive.value = true
+  spanMs.value = 5 * 60_000
+  nowTick.value = Date.now()
+}
+
+const spanText = computed(() => fmtSpan(spanMs.value))
+function fmtSpan(ms: number) {
+  if (ms < 60_000) return Math.round(ms / 1000) + ' 秒'
+  if (ms < 3600_000) return Math.round(ms / 60_000) + ' 分钟'
+  if (ms < 86400_000) return (ms / 3600_000).toFixed(1).replace(/\.0$/, '') + ' 小时'
+  return Math.round(ms / 86400_000) + ' 天'
+}
+
+// 折线图点集：把原始采样换算成各图表用的百分比/速率序列
+const chartPoints = computed<ChartPoint[]>(() => {
+  const tot = data.value?.mem?.MemTotal || 0
+  return history.value.map((p) => {
+    const memPct =
+      tot > 0 && p.mem_avail != null
+        ? Math.min(100, Math.max(0, 100 - (p.mem_avail / tot) * 100))
+        : null
+    const swapPct =
+      p.swap_total > 0 ? Math.min(100, Math.max(0, ((p.swap_total - p.swap_free) / p.swap_total) * 100)) : null
+    return { ts: p.ts, cpu: p.cpu, memPct, swapPct, rx: p.rx, tx: p.tx }
+  })
+})
+
+// 窗口变化（缩放/平移/实时滑动）→ 防抖拉取对应时间段
+let fetchDeb: number | undefined
+watch([t0, t1], () => {
+  if (fetchDeb) window.clearTimeout(fetchDeb)
+  fetchDeb = window.setTimeout(() => fetchSeries(), 200)
+})
+
 const fmtKB = (kb?: number) => {
   if (kb == null || kb <= 0) return '–'
   return kb >= 1048576 ? (kb / 1048576).toFixed(2) + ' G' : kb >= 1024 ? (kb / 1024).toFixed(0) + ' M' : kb + ' K'
 }
+const fmtRate = (kv?: number | null) => {
+  if (kv == null || kv <= 0) return '–'
+  if (kv >= 1048576) return (kv / 1048576).toFixed(2) + ' GB/s'
+  if (kv >= 1024) return (kv / 1024).toFixed(1) + ' MB/s'
+  return kv.toFixed(0) + ' KB/s'
+}
+const rxRate = computed(() => fmtRate(data.value?.rx_kb_s))
+const txRate = computed(() => fmtRate(data.value?.tx_kb_s))
 const lvl = (p: number) => (p > 90 ? 'bad' : p > 70 ? 'warn' : 'ok')
 const pctColor = (p: number) => (p > 90 ? '#f87171' : p > 70 ? '#fbbf24' : '#34d399')
 const clock = (ts: number) => (ts ? new Date(ts * 1000).toLocaleTimeString() : '–')
@@ -148,94 +351,15 @@ const procs = computed(() => [...(data.value?.procs || [])].sort((a, b) => (pars
 const procMaxCpu = computed(() => Math.max(1, ...procs.value.map((p) => parseFloat(p.cpu) || 0)))
 const cpuNum = (p: PhoneProc) => parseFloat(p.cpu) || 0
 
-const themeColor = (name: string) =>
-  getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#d4af37'
-
-function spark(cv: HTMLCanvasElement | null, arr: number[], color: string, max: number, latest?: number | null) {
-  if (!cv) return
-  const c = cv.getContext('2d')
-  if (!c) return
-  const dpr = window.devicePixelRatio || 1
-  const w = Math.max(320, cv.clientWidth)
-  const h = 44
-  cv.width = w * dpr
-  cv.height = h * dpr
-  c.scale(dpr, dpr)
-  c.clearRect(0, 0, w, h)
-  const padTop = 12
-  const padBottom = 6
-  const plotH = h - padTop - padBottom
-  const m = max || 1
-  const X = (i: number) => (arr.length > 1 ? (i / (arr.length - 1)) * w : w / 2)
-  const Y = (v: number) => padTop + plotH - (Math.min(Math.max(v, 0), m) / m) * plotH
-
-  c.strokeStyle = 'rgba(255,255,255,.07)'
-  c.lineWidth = 1
-  for (let g = 1; g <= 3; g++) {
-    const gy = padTop + (plotH * g) / 4
-    c.beginPath()
-    c.moveTo(0, gy)
-    c.lineTo(w, gy)
-    c.stroke()
-  }
-
-  if (latest != null && arr.length) {
-    const ly = Y(latest)
-    c.beginPath()
-    c.arc(w - 4, ly, 3, 0, Math.PI * 2)
-    c.fillStyle = color
-    c.fill()
-    c.fillStyle = color
-    c.font = '600 10px Consolas, monospace'
-    c.textAlign = 'right'
-    c.fillText(latest.toFixed(0) + '%', w - 10, ly - 6)
-  }
-
-  if (arr.length < 1) return
-  const stroke = (close: boolean) => {
-    c.beginPath()
-    arr.forEach((v, i) => (i ? c.lineTo(X(i), Y(v)) : c.moveTo(X(i), Y(v))))
-    if (close) {
-      c.lineTo(w, h - 2)
-      c.lineTo(0, h - 2)
-      c.closePath()
-    }
-  }
-  const g = c.createLinearGradient(0, 0, 0, h)
-  g.addColorStop(0, color + '55')
-  g.addColorStop(1, color + '00')
-  c.fillStyle = g
-  stroke(true)
-  c.fill()
-  stroke(false)
-  c.strokeStyle = color
-  c.lineWidth = 2
-  c.lineJoin = 'round'
-  c.shadowColor = color
-  c.shadowBlur = 8
-  c.stroke()
-  c.shadowBlur = 0
-}
-
-function draw() {
-  const d = data.value
-  const tot = d?.mem?.MemTotal || 0
-  const cpuArr = d?.hist.cpu || []
-  const memArr = tot > 0 ? (d?.hist.mem || []).map((av) => Math.min(100, Math.max(0, 100 - (av / tot) * 100))) : []
-  requestAnimationFrame(() => {
-    spark(document.getElementById('cpuChart') as HTMLCanvasElement, cpuArr, themeColor('--accent'), 100, cpuAvg.value)
-    spark(document.getElementById('memChart') as HTMLCanvasElement, memArr, themeColor('--accent-bright'), 100, memUsedPct.value)
-  })
-}
-
 async function tick() {
   try {
-    const d = await fetchPhoneStatus()
+    const d = monitorSource.value === 'win' ? await fetchWinStatus() : await fetchPhoneStatus()
     data.value = d
     error.value = ''
     loading.value = false
     fresh.value = d.ts ? Math.max(0, Math.round(Date.now() / 1000 - d.ts)) : 0
-    draw()
+    nowTick.value = Date.now()
+    appendLivePoint(d)
   } catch (e) {
     error.value = String(e)
     loading.value = false
@@ -277,7 +401,10 @@ function stopPolling() {
 }
 
 onMounted(() => {
-  if (authed.value) startPolling()
+  if (authed.value) {
+    startPolling()
+    fetchSeries()
+  }
 })
 onBeforeUnmount(stopPolling)
 
@@ -309,10 +436,14 @@ const isStale = computed(() => fresh.value != null && fresh.value > 10)
         <header class="head">
           <div class="head-idx">
             <span class="idx">HOST</span>
-            <span class="idx dim">TEL-AN10</span>
+            <span class="idx dim">{{ monitorSource === 'win' ? 'WIN-SRV' : 'TEL-AN10' }}</span>
           </div>
           <div class="head-title">
-            <h1>MC 服务器面板 <span class="tag">华为 TEL-AN10 · Fabric 26.2 服</span></h1>
+            <h1>MC 服务器面板 <span class="tag">{{ monitorSource === 'win' ? 'Windows Server · 150.138.72.66' : '华为 TEL-AN10 · Fabric 服' }}</span></h1>
+          </div>
+          <div class="srv-switch">
+            <button :class="{ on: monitorSource === 'phone' }" @click="switchSource('phone')">手机</button>
+            <button :class="{ on: monitorSource === 'win' }" @click="switchSource('win')">Windows</button>
           </div>
           <div class="meta">
             <span class="dot" :class="{ off: data && (!data.ok || isStale) }"></span>
@@ -328,65 +459,114 @@ const isStale = computed(() => fresh.value != null && fresh.value > 10)
           </div>
         </header>
 
-        <!-- ── 性能监控 KPI（首屏直出） ── -->
+        <!-- ── 性能监控：CPU/内存/Swap/网络折线图（悬停看时间段 + 滚轮缩放）+ 磁盘百分比 ── -->
         <div v-if="!data && loading" class="empty">连接中…</div>
-        <div v-else class="kpis">
-          <section class="kpi" style="--a:var(--accent)">
-            <h2>CPU 使用率<template v-if="nproc">（{{ nproc }} 核）</template><span class="l dim">{{ cpuSumTxt }}</span></h2>
-            <div class="big" :style="{ color: cpuAvg != null ? pctColor(cpuAvg) : '#9a917f' }">
-              {{ cpuAvg != null ? cpuAvg.toFixed(1) + '%' : '无数据' }}
+        <template v-else>
+          <div class="charts-panel">
+            <div class="charts-toolbar">
+              <span class="span-chip">显示最近 {{ spanText }}</span>
+              <span class="hint">滚轮缩放 · 拖动平移 · 悬停查看时间点 · 采样间隔 3s</span>
+              <span class="live-dot" :class="{ off: !followLive }"></span>
+              <button class="live-btn" :disabled="followLive" @click="resetLive">回到实时</button>
             </div>
-            <div class="bar"><i :class="cpuAvg != null ? lvl(cpuAvg) : ''" :style="{ width: (cpuAvg ?? 0) + '%' }"></i></div>
-            <div class="subline">
-              负载 1/5/15：{{ loadLine ?? '无数据' }}<span v-if="loadRate" class="l dim">负载率 {{ loadRate }}</span>
+
+            <div class="charts-grid">
+              <section class="chart-block" style="--a:var(--accent)">
+                <div class="chart-head">
+                  <h2>CPU 使用率<template v-if="nproc">（{{ nproc }} 核）</template></h2>
+                  <div class="cur" :style="{ color: cpuAvg != null ? pctColor(cpuAvg) : '#9a917f' }">
+                    {{ cpuAvg != null ? cpuAvg.toFixed(1) + '%' : '无数据' }}
+                  </div>
+                </div>
+                <div class="chart-sub">
+                  负载 1/5/15：{{ loadLine ?? '无数据' }}<span v-if="loadRate" class="l dim">负载率 {{ loadRate }}</span>
+                  <span class="l dim">{{ cpuSumTxt }}</span>
+                </div>
+                <LineChart :points="chartPoints" :series="cpuSeries" :t0="t0" :t1="t1" :y-max="100" @viewport="onViewport" />
+                <div v-if="cores" class="cores">
+                  <div v-for="(c, i) in cores" :key="i" class="core" :title="'CPU' + i + '：' + c.toFixed(0) + '%'">
+                    <span class="corebar" :style="{ height: c + '%', background: pctColor(c), color: pctColor(c) }"></span>
+                    <em>{{ i }}</em>
+                  </div>
+                </div>
+                <div v-else-if="data" class="chart-sub dim">各核明细：需要 root 读取 /proc/stat，本机系统限制不可读</div>
+              </section>
+
+              <section class="chart-block" style="--a:var(--accent-bright)">
+                <div class="chart-head">
+                  <h2>内存 <span class="l dim">已用</span></h2>
+                  <template v-if="memOk">
+                    <div class="cur" :style="{ color: pctColor(memUsedPct) }">{{ memUsedPct.toFixed(0) }}%</div>
+                  </template>
+                  <template v-else>
+                    <div class="cur muted">无数据</div>
+                  </template>
+                </div>
+                <div class="chart-sub">
+                  <template v-if="memOk">
+                    已用 <b class="val">{{ fmtKB(memUsedKB) }}</b> · 可用 {{ fmtKB(memAvail) }} · 总量 {{ fmtKB(memTotal) }}
+                  </template>
+                  <template v-else>锁屏或后台时内存字段不可用</template>
+                </div>
+                <LineChart :points="chartPoints" :series="memSeries" :t0="t0" :t1="t1" :y-max="100" @viewport="onViewport" />
+              </section>
+
+              <section class="chart-block" style="--a:#fbbf24">
+                <div class="chart-head">
+                  <h2>Swap 交换区 <span class="l dim">已用</span></h2>
+                  <template v-if="swapOk">
+                    <div class="cur" :style="{ color: pctColor(swapUsed) }">{{ swapUsed.toFixed(0) }}%</div>
+                  </template>
+                  <template v-else>
+                    <div class="cur muted">未启用</div>
+                  </template>
+                </div>
+                <div class="chart-sub">
+                  <template v-if="swapOk">
+                    已用 <b class="val">{{ fmtKB(swapTotal - (data?.mem.SwapFree || 0)) }}</b> · 总量 {{ fmtKB(swapTotal) }}
+                  </template>
+                  <template v-else>本机无 Swap 分区</template>
+                </div>
+                <LineChart
+                  v-if="swapOk"
+                  :points="chartPoints"
+                  :series="swapSeries"
+                  :t0="t0"
+                  :t1="t1"
+                  :y-max="100"
+                  @viewport="onViewport"
+                />
+                <div v-else class="chart-empty">未启用，无折线图</div>
+              </section>
+
+              <section class="chart-block" style="--a:#38bdf8">
+                <div class="chart-head">
+                  <h2>网络流量 <span class="l dim">入/出</span></h2>
+                  <div class="cur-net">
+                    <span class="net-cur" style="color: #38bdf8">↓ {{ rxRate }}</span>
+                    <span class="net-cur" style="color: #a78bfa">↑ {{ txRate }}</span>
+                  </div>
+                </div>
+                <div class="chart-sub">入站 / 出站速率（KB/s，Windows 源每 3s 采样）</div>
+                <LineChart :points="chartPoints" :series="netSeries" :t0="t0" :t1="t1" @viewport="onViewport" />
+              </section>
             </div>
-            <div v-if="cores" class="cores">
-              <div v-for="(c, i) in cores" :key="i" class="core" :title="'CPU' + i + '：' + c.toFixed(0) + '%'">
-                <span class="corebar" :style="{ height: c + '%', background: pctColor(c), color: pctColor(c) }"></span>
-                <em>{{ i }}</em>
-              </div>
-            </div>
-            <div v-else-if="data" class="subline dim">各核明细：需要 root 读取 /proc/stat，本机系统限制不可读</div>
-            <canvas id="cpuChart"></canvas>
-          </section>
 
-          <section class="kpi" style="--a:var(--accent-bright)">
-            <h2>内存 <span class="l dim">已用</span></h2>
-            <template v-if="memOk">
-              <div class="big" :style="{ color: pctColor(memUsedPct) }">{{ memUsedPct.toFixed(0) }}%</div>
-              <div class="bar"><i :class="lvl(memUsedPct)" :style="{ width: memUsedPct + '%' }"></i></div>
-              <div class="subline">
-                已用 <b class="val">{{ fmtKB(memUsedKB) }}</b> · 可用 {{ fmtKB(memAvail) }} · 总量 {{ fmtKB(memTotal) }}
-              </div>
-            </template>
-            <template v-else>
-              <div class="big muted">无数据</div>
-              <div class="subline">锁屏或后台时内存字段不可用</div>
-            </template>
-            <canvas id="memChart"></canvas>
-          </section>
+            <div class="panel-divider"></div>
 
-          <section class="kpi" style="--a:#fbbf24">
-            <h2>Swap 交换区 <span class="l dim">已用</span></h2>
-            <template v-if="swapOk">
-              <div class="big" :style="{ color: pctColor(swapUsed) }">{{ swapUsed.toFixed(0) }}%</div>
-              <div class="bar"><i :class="lvl(swapUsed)" :style="{ width: swapUsed + '%' }"></i></div>
-              <div class="subline">
-                已用 <b class="val">{{ fmtKB(swapTotal - (data?.mem.SwapFree || 0)) }}</b> · 总量 {{ fmtKB(swapTotal) }}
+            <!-- 磁盘占用：基本不随时间变，保留百分比显示 -->
+            <div class="disk-block">
+              <div class="chart-head">
+                <h2>存储 <span class="l dim">磁盘占用 · 变化缓慢，用百分比</span></h2>
+                <template v-if="diskOk">
+                  <div class="cur" :style="{ color: pctColor(diskAgg.p) }">{{ diskAgg.p.toFixed(0) }}%</div>
+                </template>
+                <template v-else>
+                  <div class="cur muted">无数据</div>
+                </template>
               </div>
-            </template>
-            <template v-else>
-              <div class="big muted">未启用</div>
-              <div class="subline">本机无 Swap 分区</div>
-            </template>
-          </section>
-
-          <section class="kpi" style="--a:var(--accent-deep)">
-            <h2>存储 <span class="l dim">分区</span></h2>
-            <template v-if="diskOk">
-              <div class="big" :style="{ color: pctColor(diskAgg.p) }">{{ diskAgg.p.toFixed(0) }}%</div>
-              <div class="bar"><i :class="lvl(diskAgg.p)" :style="{ width: diskAgg.p + '%' }"></i></div>
-              <div class="subline">已用 {{ fmtKB(diskAgg.du) }} / {{ fmtKB(diskAgg.dt) }}</div>
+              <div v-if="diskOk" class="disk-sub">已用 <b class="val">{{ fmtKB(diskAgg.du) }}</b> / {{ fmtKB(diskAgg.dt) }}</div>
+              <div v-else class="chart-sub">未读到分区信息</div>
               <div v-for="d in diskList" :key="d.mnt" class="diskline">
                 <div class="diskhead">
                   <span class="mono">{{ d.mnt }}</span>
@@ -394,15 +574,11 @@ const isStale = computed(() => fresh.value != null && fresh.value > 10)
                 </div>
                 <div class="bar thin"><i :class="lvl(diskPct(d))" :style="{ width: diskPct(d) + '%' }"></i></div>
               </div>
-            </template>
-            <template v-else>
-              <div class="big muted">无数据</div>
-              <div class="subline">未读到分区信息</div>
-            </template>
-          </section>
-        </div>
+            </div>
+          </div>
+        </template>
 
-        <p class="note">监控为被动只读采样（无 root，CPU 为「ps 可见进程近似值」，各核明细/负载不可读）；内存 / 存储 / 进程表始终可用。控制台命令会真实发送（stop / save-all 等），请谨慎操作。</p>
+        <p class="note">{{ monitorSource === 'win' ? '监控为被动只读 SSH 采样（PowerShell 计数器，CPU 为真实占用，各核明细可用）；内存 / 存储 / 进程表始终可用。控制台命令经 RCON 真实发送（stop / save-all 等），请谨慎操作。' : '监控为被动只读采样（无 root，CPU 为「ps 可见进程近似值」，各核明细/负载不可读）；内存 / 存储 / 进程表始终可用。控制台命令会真实发送（stop / save-all 等），请谨慎操作。' }}</p>
 
         <!-- ── 下排：控制台 + 进程表 ── -->
         <div class="lower">
@@ -448,7 +624,7 @@ const isStale = computed(() => fresh.value != null && fresh.value > 10)
           </section>
 
           <section v-if="data" class="procs">
-            <h2>进程 TOP 10 <span class="l dim">亮屏时可见 mc 服务端</span></h2>
+            <h2>进程 TOP 10 <span class="l dim">按 CPU 排序</span></h2>
             <div class="tablewrap">
               <table>
                 <thead>
@@ -523,29 +699,60 @@ h1 { font-size: 23px; margin: 0; font-weight: 800; letter-spacing: .02em; color:
 .logout-btn { font-size: 12px; color: var(--muted); background: rgba(255,255,255,.05); border: 1px solid var(--line-strong); border-radius: 6px; padding: 4px 12px; cursor: pointer; }
 .logout-btn:hover { color: #f87171; border-color: #f8717166; }
 
-/* ── KPI ── */
-.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 10px; }
-.kpi { position: relative; display: flex; flex-direction: column; min-height: 210px; background: rgba(17, 15, 9, .74); border: 1px solid var(--line); border-radius: 8px; padding: 14px 15px 12px; backdrop-filter: blur(14px); }
-.kpi::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, var(--a), transparent 70%); box-shadow: 0 0 10px var(--a); }
-.kpi h2 { font-size: 12px; color: #cfc6ad; margin: 0 0 6px; font-weight: 600; display: flex; align-items: center; flex-wrap: wrap; letter-spacing: .05em; }
-.big { font-size: 30px; font-weight: 800; font-variant-numeric: tabular-nums; font-family: Consolas, monospace; text-shadow: 0 0 18px currentColor; }
-.big.muted { color: var(--muted); font-weight: 600; text-shadow: none; }
-.subline { font-size: 11.5px; color: var(--muted); margin-top: 6px; min-height: 15px; line-height: 1.6; }
-.subline .val { color: #eef3fb; font-weight: 700; }
-.bar { height: 7px; background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: 99px; overflow: hidden; margin: 7px 0 3px; }
+/* ── 数据源切换（手机 / Windows） ── */
+.srv-switch { display: flex; gap: 0; margin-left: 12px; border: 1px solid var(--line-strong); border-radius: 7px; overflow: hidden; align-self: center; }
+.srv-switch button { font-size: 12px; font-family: Consolas, monospace; color: var(--muted); background: rgba(255,255,255,.03); border: none; padding: 6px 14px; cursor: pointer; transition: background .2s, color .2s; letter-spacing: .04em; }
+.srv-switch button + button { border-left: 1px solid var(--line); }
+.srv-switch button.on { color: #14110a; background: linear-gradient(90deg, var(--accent), var(--accent-bright)); font-weight: 700; }
+.srv-switch button:not(.on):hover { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+/* ── 折线图工具条（整体面板内） ── */
+.charts-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; padding: 0 0 10px; border-bottom: 1px solid color-mix(in srgb, var(--accent) 10%, transparent); }
+.span-chip { font-size: 12px; font-family: Consolas, monospace; color: #14110a; background: linear-gradient(90deg, var(--accent), var(--accent-bright)); padding: 3px 11px; border-radius: 99px; font-weight: 700; letter-spacing: .03em; }
+.hint { font-size: 11.5px; color: var(--muted); }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: #34d399; box-shadow: 0 0 8px #34d399; transition: background .3s, box-shadow .3s; }
+.live-dot.off { background: #f87171; box-shadow: 0 0 8px #f87171; }
+.live-btn { margin-left: auto; font-size: 12px; color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 6px; padding: 4px 12px; cursor: pointer; font-family: Consolas, monospace; }
+.live-btn:disabled { opacity: .4; cursor: default; }
+.live-btn:not(:disabled):hover { background: color-mix(in srgb, var(--accent) 18%, transparent); box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 20%, transparent); }
+
+/* ── 整体面板（所有图放一起，不分子卡片） ── */
+.charts-panel { background: rgba(17,15,9,.74); border: 1px solid var(--line); border-radius: 8px; padding: 13px 15px 12px; backdrop-filter: blur(14px); margin-bottom: 10px; }
+.charts-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 24px; }
+.chart-block { position: relative; display: flex; flex-direction: column; gap: 5px; padding-top: 11px; }
+.chart-block::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, var(--a), transparent 70%); box-shadow: 0 0 8px var(--a); opacity: .55; }
+.panel-divider { height: 1px; margin: 14px 0 10px; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 22%, transparent), transparent); }
+.chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.chart-head h2 { font-size: 12.5px; color: #cfc6ad; margin: 0; font-weight: 600; letter-spacing: .05em; display: flex; align-items: center; flex-wrap: wrap; }
+.cur { font-size: 25px; font-weight: 800; font-variant-numeric: tabular-nums; font-family: Consolas, monospace; text-shadow: 0 0 16px currentColor; line-height: 1; }
+.cur.muted { color: var(--muted); font-weight: 600; text-shadow: none; font-size: 17px; }
+.cur-net { display: flex; gap: 12px; align-items: baseline; }
+.net-cur { font-size: 14.5px; font-weight: 700; font-family: Consolas, monospace; font-variant-numeric: tabular-nums; text-shadow: 0 0 12px currentColor; }
+.chart-sub { font-size: 11.5px; color: var(--muted); min-height: 14px; line-height: 1.6; }
+.chart-sub .val { color: #eef3fb; font-weight: 700; }
+.chart-empty { height: 195px; display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 12px; }
+
+/* ── 磁盘百分比块 ── */
+.disk-block { padding-top: 2px; }
+.disk-sub { font-size: 11.5px; color: var(--muted); margin: 4px 0 2px; }
+.disk-sub .val { color: #eef3fb; font-weight: 700; }
+.diskline { margin-top: 7px; padding-top: 5px; border-top: 1px dashed rgba(255,255,255,.07); }
+.diskhead { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; margin-bottom: 3px; }
+
+/* ── 磁盘分区百分比条（保留） ── */
+.bar { height: 7px; background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: 99px; overflow: hidden; margin: 3px 0; }
 .bar.thin { height: 4px; margin: 4px 0 6px; }
 .bar > i { display: block; height: 100%; width: 0; border-radius: 99px; transition: width .6s; }
 .bar > i.ok { background: linear-gradient(90deg, #34d399, var(--accent)); box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 53%, transparent); }
 .bar > i.warn { background: linear-gradient(90deg, #fbbf24, #f97316); box-shadow: 0 0 8px #f9731688; }
 .bar > i.bad { background: linear-gradient(90deg, #f87171, #ef4444); box-shadow: 0 0 8px #ef444488; }
-.diskline { margin-top: 6px; padding-top: 5px; border-top: 1px dashed rgba(255,255,255,.07); }
-.diskhead { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; margin-bottom: 2px; }
-.cores { display: flex; gap: 4px; align-items: stretch; margin-top: 8px; height: 30px; position: relative; padding-bottom: 12px; }
+
+/* ── 各核明细（直方分布，非横条百分比） ── */
+.cores { display: flex; gap: 4px; align-items: stretch; margin-top: 6px; height: 30px; position: relative; padding-bottom: 12px; }
 .cores::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 35%, transparent), transparent); }
 .core { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 3px; min-width: 0; }
 .corebar { display: block; width: 72%; max-width: 18px; border-radius: 3px 3px 0 0; min-height: 2px; transition: height .5s; box-shadow: 0 0 8px currentColor; }
 .core em { font-size: 9px; color: var(--dim); font-style: normal; font-family: Consolas, monospace; line-height: 1; margin-top: 2px; }
-canvas { width: 100%; height: 44px; display: block; margin-top: auto; padding-top: 4px; }
 
 /* ── 说明 ── */
 .note { font-size: 11px; color: var(--muted); background: rgba(243, 189, 104, .06); border: 1px solid rgba(243, 189, 104, .24); border-radius: 5px; padding: 6px 11px; margin-bottom: 10px; line-height: 1.6; border-left: 3px solid rgba(243,189,104,.5); }
@@ -599,15 +806,14 @@ tbody tr.top td:first-child { color: var(--accent); text-shadow: 0 0 8px color-m
 
 /* 窄屏适配 */
 @media (max-width: 1180px) {
-  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lower { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .charts-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
   .monitor { padding: 16px 14px; }
-  .kpis { grid-template-columns: 1fr; }
-  .kpi { min-height: 0; }
   h1 { font-size: 18px; }
-  .big { font-size: 26px; }
   .comm { max-width: 150px; }
   .head-title { width: 100%; }
   .meta { margin-left: 0; width: 100%; }
