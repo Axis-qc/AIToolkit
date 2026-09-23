@@ -12,7 +12,17 @@
 """
 
 # DB 连接 & 生命周期
-from .db import DB_PATH, init_db, close, cleanup_expired, _connect
+from .db import (
+    DB_PATH,
+    init_db,
+    close,
+    cleanup_expired,
+    list_tombstones,
+    now_ts,
+    parse_ts,
+    retention_hours,
+    _connect,
+)
 
 # CRUD
 from .graph_crud import (
@@ -22,6 +32,10 @@ from .graph_crud import (
     list_entity_keywords,
     list_entity_types_summary,
     list_entities_by_type,
+    get_entities_by_names,
+    list_entities_paged,
+    set_stale_mark,
+    batch_update_entities,
     create_fact,
     update_fact,
     get_fact_by_id,
@@ -41,6 +55,7 @@ from .graph_crud import (
     restore_fact,
     list_deprecated,
     merge_entities,
+    preview_merge,
     get_entity_neighborhood,
     get_entity_detail,
     refresh_relation_index,
@@ -52,6 +67,16 @@ from .graph_crud import (
 from .graph_search import (
     search_entities,
     get_pinned_entities,
+)
+
+# 体检
+from .graph_health import (
+    health_check,
+    find_duplicate_candidates,
+    find_stale_entries,
+    find_type_fragments,
+    find_dangling_relations,
+    run_lint,
 )
 
 # 前端可视化查询

@@ -3,9 +3,8 @@
 从 core/graph.py 拆出。
 """
 import json
-from datetime import datetime, timezone
 
-from .db import _connect, cleanup_expired
+from .db import _connect, cleanup_expired, now_ts
 
 
 # ── 实体 CRUD ───────────────────────────────────────────
@@ -20,7 +19,7 @@ async def upsert_entity(
 ):
     """创建或更新实体。支持 content/relations 新字段，自动维护关系索引。"""
     db = await _connect()
-    now = datetime.now(timezone.utc).strftime("%Y:%m:%d:%H:%M:%S")
+    now = now_ts()
     relations_json = json.dumps(relations or [], ensure_ascii=False)
     props_json = json.dumps(props or {}, ensure_ascii=False)
 
@@ -63,7 +62,7 @@ async def update_entity(
     if not row:
         return False
 
-    now = datetime.now(timezone.utc).strftime("%Y:%m:%d:%H:%M:%S")
+    now = now_ts()
     effective_name = new_name if new_name is not None else name
     etype = new_type if new_type is not None else row["type"]
     content = new_content if new_content is not None else row["content"]
@@ -215,6 +214,217 @@ async def list_entities_by_type(entity_type: str, limit: int = 50) -> list[dict]
     ]
 
 
+# ── 批量读取 ────────────────────────────────────────────
+
+
+def _row_to_detail(row) -> dict:
+    """实体行 → 完整字典（含 content 与时间戳）。"""
+    return {
+        "name": row["name"],
+        "type": row["type"],
+        "content": row["content"] or "",
+        "relations": json.loads(row["relations"] or "[]"),
+        "properties": json.loads(row["properties"] or "{}"),
+        "importance": row["importance"],
+        "pinned": bool(row["pinned"]),
+        "is_root": bool(row["is_root"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "deprecated_at": row["deprecated_at"],
+        "stale_marked_at": row["stale_marked_at"],
+        "verified_until": row["verified_until"],
+    }
+
+
+_DETAIL_COLS = (
+    "name, type, content, relations, properties, importance, pinned, is_root, "
+    "created_at, updated_at, deprecated_at, stale_marked_at, verified_until"
+)
+
+
+async def get_entities_by_names(names: list[str], include_deprecated: bool = False) -> list[dict]:
+    """按名字数组批量读取实体完整字段（含 content 与时间戳）。
+
+    替代逐条 get_entity：641 个实体判断过时不再需要几百次调用。
+    返回顺序与传入 names 一致，未找到的名字不出现在结果里；
+    另有 missing 字段由调用方通过对比得到，这里保持纯列表。
+    """
+    if not names:
+        return []
+    db = await _connect()
+    # 去重但保留首次出现的顺序
+    ordered = list(dict.fromkeys(names))
+    placeholders = ",".join("?" for _ in ordered)
+    sql = f"SELECT {_DETAIL_COLS} FROM entities WHERE name IN ({placeholders})"
+    if not include_deprecated:
+        sql += " AND deprecated_at IS NULL"
+    cur = await db.execute(sql, ordered)
+    found = {row["name"]: _row_to_detail(row) for row in await cur.fetchall()}
+    return [found[n] for n in ordered if n in found]
+
+
+async def list_entities_paged(
+    offset: int = 0,
+    limit: int = 100,
+    entity_type: str | None = None,
+    include_content: bool = True,
+) -> dict:
+    """分页列出实体，可选带 content，用于大批量判断过时。
+
+    返回 { "total": 总数, "offset":, "limit":, "items": [...] }
+    """
+    db = await _connect()
+    offset = max(0, offset)
+    limit = max(1, min(limit, 1000))
+
+    where = "deprecated_at IS NULL"
+    params: list = []
+    if entity_type:
+        where += " AND type = ?"
+        params.append(entity_type)
+
+    cur = await db.execute(f"SELECT COUNT(*) AS c FROM entities WHERE {where}", params)
+    total = (await cur.fetchone())["c"]
+
+    cols = _DETAIL_COLS if include_content else (
+        "name, type, importance, pinned, is_root, created_at, updated_at, "
+        "deprecated_at, stale_marked_at, verified_until"
+    )
+    cur = await db.execute(
+        f"SELECT {cols} FROM entities WHERE {where} "
+        "ORDER BY importance DESC, name LIMIT ? OFFSET ?",
+        params + [limit, offset],
+    )
+    items = []
+    for row in await cur.fetchall():
+        item = {
+            "name": row["name"],
+            "type": row["type"],
+            "importance": row["importance"],
+            "pinned": bool(row["pinned"]),
+            "is_root": bool(row["is_root"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "deprecated_at": row["deprecated_at"],
+            "stale_marked_at": row["stale_marked_at"],
+            "verified_until": row["verified_until"],
+        }
+        if include_content:
+            item["content"] = row["content"] or ""
+            item["relations"] = json.loads(row["relations"] or "[]")
+            item["properties"] = json.loads(row["properties"] or "{}")
+        items.append(item)
+    return {"total": total, "offset": offset, "limit": limit, "items": items}
+
+
+# ── 过时标注（结构化，不走正文文本匹配）─────────────────
+
+
+async def set_stale_mark(
+    name: str,
+    stale_marked_at: str | None = None,
+    verified_until: str | None = None,
+    clear: bool = False,
+) -> bool:
+    """写入或清除实体的过时标注字段。
+
+    stale_marked_at 记录「什么时候被打上待验证标注」，
+    verified_until 记录「核实到哪个日期为止有效」。两者都是结构化列，
+    体检、清理都直接查字段，不再靠 content LIKE '%待验证%' 匹配。
+    clear=True 时两个字段一起清空（核实无误后去掉标注）。
+    """
+    db = await _connect()
+    cur = await db.execute(
+        "SELECT name FROM entities WHERE name=? AND deprecated_at IS NULL", (name,)
+    )
+    if not await cur.fetchone():
+        return False
+    if clear:
+        await db.execute(
+            "UPDATE entities SET stale_marked_at=NULL, verified_until=NULL, updated_at=? WHERE name=?",
+            (now_ts(), name),
+        )
+    else:
+        marked = stale_marked_at or now_ts()
+        await db.execute(
+            "UPDATE entities SET stale_marked_at=?, verified_until=?, updated_at=? WHERE name=?",
+            (marked, verified_until, now_ts(), name),
+        )
+    await db.commit()
+    return True
+
+
+# ── 批量写入 ────────────────────────────────────────────
+
+
+async def batch_update_entities(
+    names: list[str],
+    new_type: str | None = None,
+    stale_marked_at: str | None = None,
+    verified_until: str | None = None,
+    clear_stale: bool = False,
+    importance: int | None = None,
+    soft_delete: bool = False,
+) -> dict:
+    """对一批实体执行同一项修改：重设类型 / 打标注 / 设重要度 / 软删除。
+
+    整理天生是批量的，这里一次处理多个目标，避免逐条调 update_memory。
+    返回逐条结果，未找到的记入 missing，不会静默跳过。
+    """
+    applied: list[str] = []
+    missing: list[str] = []
+    for name in dict.fromkeys(names):
+        db = await _connect()
+        cur = await db.execute(
+            "SELECT name FROM entities WHERE name=? AND deprecated_at IS NULL", (name,)
+        )
+        if not await cur.fetchone():
+            missing.append(name)
+            continue
+
+        if soft_delete:
+            await soft_delete_entity(name)
+            applied.append(name)
+            continue
+
+        sets: list[str] = []
+        params: list = []
+        if new_type is not None:
+            sets.append("type=?")
+            params.append(new_type)
+        if clear_stale:
+            sets.append("stale_marked_at=NULL")
+            sets.append("verified_until=NULL")
+        else:
+            if stale_marked_at is not None:
+                sets.append("stale_marked_at=?")
+                params.append(stale_marked_at or now_ts())
+            if verified_until is not None:
+                sets.append("verified_until=?")
+                params.append(verified_until)
+        if importance is not None:
+            sets.append("importance=?")
+            params.append(max(1, min(int(importance), 10)))
+
+        if not sets:
+            missing.append(name)
+            continue
+
+        sets.append("updated_at=?")
+        params.append(now_ts())
+        params.append(name)
+        await db.execute(f"UPDATE entities SET {', '.join(sets)} WHERE name=?", params)
+        await db.commit()
+        applied.append(name)
+
+    return {
+        "applied": applied,
+        "applied_count": len(applied),
+        "missing": missing,
+        "missing_count": len(missing),
+    }
+
+
 # ── 关系索引维护 ──────────────────────────────────────
 
 
@@ -276,7 +486,7 @@ async def create_fact(content: str, ftype: str, about_entities: list[str]):
     )
     if await cur.fetchone():
         return  # 已存在，跳过
-    ts = datetime.now(timezone.utc).strftime("%Y:%m:%d:%H:%M:%S")
+    ts = now_ts()
     await db.execute(
         "INSERT INTO facts (content, type, about_entities, ts) VALUES (?, ?, ?, ?)",
         (content, ftype, about_json, ts),
@@ -348,7 +558,7 @@ async def delete_fact(fact_id: int) -> bool:
 
 async def index_conversation(conv_id: str, file_path: str, title: str):
     db = await _connect()
-    now = datetime.now(timezone.utc).strftime("%Y:%m:%d:%H:%M:%S")
+    now = now_ts()
     await db.execute(
         "INSERT OR REPLACE INTO conversations (id, file_path, title, created_at, archived)"
         " VALUES (?, ?, ?, ?, 0)",
@@ -434,7 +644,7 @@ async def soft_delete_entity(name: str) -> bool:
     cur = await db.execute("SELECT name FROM entities WHERE name=? AND deprecated_at IS NULL", (name,))
     if not await cur.fetchone():
         return False
-    now = datetime.now(timezone.utc).strftime("%Y:%m:%d:%H:%M:%S")
+    now = now_ts()
     # 1. 标记实体已删
     await db.execute("UPDATE entities SET deprecated_at=?, updated_at=? WHERE name=?", (now, now, name))
     # 2. 出边：直接删除（我的声明，我没了就作废）
@@ -457,7 +667,7 @@ async def soft_delete_fact(fact_id: int) -> bool:
     cur = await db.execute("SELECT id FROM facts WHERE id=? AND deprecated_at IS NULL", (fact_id,))
     if not await cur.fetchone():
         return False
-    now = datetime.now(timezone.utc).strftime("%Y:%m:%d:%H:%M:%S")
+    now = now_ts()
     await db.execute("UPDATE facts SET deprecated_at=? WHERE id=?", (now, fact_id))
     await db.commit()
     await cleanup_expired()
@@ -471,7 +681,7 @@ async def restore_entity(name: str) -> bool:
     if not await cur.fetchone():
         return False
     await db.execute("UPDATE entities SET deprecated_at=NULL, updated_at=? WHERE name=?",
-                     (datetime.now(timezone.utc).strftime("%Y:%m:%d:%H:%M:%S"), name))
+                     (now_ts(), name))
     await db.commit()
     # 出边：从 relations JSON 重建
     await refresh_relation_index(name)
@@ -558,36 +768,128 @@ async def migrate_from_old_schema():
 # ── 合并 ────────────────────────────────────────────────
 
 
-async def merge_entities(source: str, target: str) -> str:
-    """将源实体合并到目标实体：合并 relations JSON + 事实 + 属性，然后软删除源实体。"""
-    if source == target:
-        return "源实体和目标实体相同，无需合并"
+async def _plan_merge(source: str, target: str) -> dict:
+    """计算合并会产生什么后果，但不写任何数据。
 
+    返回结构同时给 preview 和实际执行使用，保证「预览看到的」就是「执行会做的」。
+    """
     db = await _connect()
 
     src = await (await db.execute(
         "SELECT * FROM entities WHERE name=? AND deprecated_at IS NULL", (source,)
     )).fetchone()
     if not src:
-        return f"未找到源实体「{source}」"
+        return {"ok": False, "error": f"未找到源实体「{source}」"}
 
     tgt = await (await db.execute(
         "SELECT * FROM entities WHERE name=? AND deprecated_at IS NULL", (target,)
     )).fetchone()
     if not tgt:
-        return f"未找到目标实体「{target}」"
+        return {"ok": False, "error": f"未找到目标实体「{target}」"}
 
-    stats: dict[str, int] = {"facts": 0, "props": 0}
-
-    # 1. 合并 relations JSON
     src_rels = json.loads(src["relations"] or "[]")
     tgt_rels = json.loads(tgt["relations"] or "[]")
     existing_pairs = {(r["name"], r.get("rel", "")) for r in tgt_rels}
+    rels_to_add: list[dict] = []
+    rels_duplicate: list[dict] = []
     for r in src_rels:
         pair = (r["name"], r.get("rel", ""))
-        if pair not in existing_pairs:
-            tgt_rels.append(r)
+        if pair in existing_pairs:
+            rels_duplicate.append(r)
+        else:
+            rels_to_add.append(r)
             existing_pairs.add(pair)
+
+    # 迁走的事实：列出具体是哪几条，光给数量没法判断该不该合
+    facts_to_move: list[dict] = []
+    for row in await (await db.execute(
+        "SELECT id, content, about_entities FROM facts WHERE deprecated_at IS NULL"
+    )).fetchall():
+        about = json.loads(row["about_entities"])
+        if source in about:
+            facts_to_move.append({
+                "id": row["id"],
+                "content": row["content"],
+                "about_entities": about,
+            })
+
+    src_props = json.loads(src["properties"] or "{}")
+    tgt_props = json.loads(tgt["properties"] or "{}")
+    props_add = {k: v for k, v in src_props.items() if k not in tgt_props}
+    props_conflict = {
+        k: {"source": src_props[k], "target": tgt_props[k]}
+        for k in src_props.keys() & tgt_props.keys()
+        if src_props[k] != tgt_props[k]
+    }
+
+    # 入边：谁指向了源实体，合并后会改指目标
+    inbound = await (await db.execute(
+        "SELECT entity_name, rel_type FROM relation_index "
+        "WHERE target_name=? AND deprecated_at IS NULL",
+        (source,),
+    )).fetchall()
+
+    importance = tgt["importance"] or 1
+    importance_after = max(importance, src["importance"] or 1)
+
+    return {
+        "ok": True,
+        "source": {
+            "name": src["name"],
+            "type": src["type"],
+            "importance": src["importance"],
+            "pinned": bool(src["pinned"]),
+            "content_length": len(src["content"] or ""),
+        },
+        "target": {
+            "name": tgt["name"],
+            "type": tgt["type"],
+            "importance": tgt["importance"],
+            "pinned": bool(tgt["pinned"]),
+            "content_length": len(tgt["content"] or ""),
+        },
+        "type_conflict": src["type"] != tgt["type"],
+        "relations_to_move": rels_to_add,
+        "relations_to_move_count": len(rels_to_add),
+        "relations_already_present": rels_duplicate,
+        "relations_already_present_count": len(rels_duplicate),
+        "facts_to_move": facts_to_move,
+        "facts_to_move_count": len(facts_to_move),
+        "properties_to_add": props_add,
+        "properties_to_add_count": len(props_add),
+        "properties_conflict": props_conflict,
+        "properties_conflict_count": len(props_conflict),
+        "inbound_relations": [{"from": r["entity_name"], "rel_type": r["rel_type"]} for r in inbound],
+        "inbound_relations_count": len(inbound),
+        "importance_before": importance,
+        "importance_after": importance_after,
+        "pinned_after": bool(tgt["pinned"] or src["pinned"]),
+        "source_content_lost": bool((src["content"] or "").strip()),
+        "source_content_preview": (src["content"] or "")[:200],
+    }
+
+
+async def preview_merge(source: str, target: str) -> dict:
+    """干跑：返回合并会迁走哪些关系、哪些事实、属性有无冲突，不落库。"""
+    if source == target:
+        return {"ok": False, "error": "源实体和目标实体相同，无需合并"}
+    return await _plan_merge(source, target)
+
+
+async def merge_entities(source: str, target: str) -> str:
+    """将源实体合并到目标实体：合并 relations JSON + 事实 + 属性，然后软删除源实体。"""
+    if source == target:
+        return "源实体和目标实体相同，无需合并"
+
+    plan = await _plan_merge(source, target)
+    if not plan["ok"]:
+        return plan["error"]
+
+    db = await _connect()
+    tgt_rels = json.loads((await (await db.execute(
+        "SELECT relations FROM entities WHERE name=?", (target,)
+    )).fetchone())["relations"] or "[]")
+    tgt_rels.extend(plan["relations_to_move"])
     await db.execute(
         "UPDATE entities SET relations=? WHERE name=?",
         (json.dumps(tgt_rels, ensure_ascii=False), target),
@@ -595,35 +897,32 @@ async def merge_entities(source: str, target: str) -> str:
     await refresh_relation_index(target)
 
     # 2. 迁移事实
-    for row in await (await db.execute(
-        "SELECT id, about_entities FROM facts WHERE deprecated_at IS NULL"
-    )).fetchall():
-        about = json.loads(row["about_entities"])
-        if source in about:
-            new_about = json.dumps(list(set(
-                target if x == source else x for x in about
-            )))
-            await db.execute("UPDATE facts SET about_entities=? WHERE id=?", (new_about, row["id"]))
-            stats["facts"] += 1
+    facts_moved = 0
+    for item in plan["facts_to_move"]:
+        new_about = json.dumps(list(set(
+            target if x == source else x for x in item["about_entities"]
+        )), ensure_ascii=False)
+        await db.execute("UPDATE facts SET about_entities=? WHERE id=?", (new_about, item["id"]))
+        facts_moved += 1
 
-    # 3. 合并属性
-    src_props = json.loads(src["properties"])
-    tgt_props = json.loads(tgt["properties"])
-    merged = {**tgt_props}
-    for k, v in src_props.items():
-        if k not in merged:
-            merged[k] = v
-            stats["props"] += 1
-    if stats["props"] > 0:
+    # 3. 合并属性（目标已有的键优先，冲突的保留目标值）
+    if plan["properties_to_add_count"] > 0:
+        tgt_props = json.loads((await (await db.execute(
+            "SELECT properties FROM entities WHERE name=?", (target,)
+        )).fetchone())["properties"] or "{}")
+        merged = {**tgt_props, **plan["properties_to_add"]}
         await db.execute(
             "UPDATE entities SET properties=? WHERE name=?",
             (json.dumps(merged, ensure_ascii=False), target),
         )
 
     # 4. 重要度和固定状态取高值
-    if (src["importance"] or 1) > (tgt["importance"] or 1):
-        await db.execute("UPDATE entities SET importance=? WHERE name=?", (src["importance"], target))
-    if src["pinned"]:
+    if plan["importance_after"] > plan["importance_before"]:
+        await db.execute(
+            "UPDATE entities SET importance=? WHERE name=?",
+            (plan["importance_after"], target),
+        )
+    if plan["pinned_after"] and not plan["target"]["pinned"]:
         await db.execute("UPDATE entities SET pinned=1 WHERE name=?", (target,))
 
     await db.commit()
@@ -633,7 +932,10 @@ async def merge_entities(source: str, target: str) -> str:
 
     return (
         f"已合并实体「{source}」→「{target}」："
-        f"合并关系 {len(src_rels)} 条、事实 {stats['facts']} 条、属性 {stats['props']} 项。"
+        f"合并关系 {plan['relations_to_move_count']} 条"
+        f"（另有 {plan['relations_already_present_count']} 条目标已有，跳过）、"
+        f"事实 {facts_moved} 条、属性 {plan['properties_to_add_count']} 项"
+        f"（属性冲突 {plan['properties_conflict_count']} 项，保留目标值）。"
     )
 
 
@@ -755,24 +1057,10 @@ async def get_entity_detail(name: str) -> dict | None:
     """精准匹配读取单个实体的完整字段。未找到返回 None。"""
     db = await _connect()
     cur = await db.execute(
-        "SELECT name, type, content, relations, properties, "
-        "importance, pinned, is_root, created_at, updated_at, deprecated_at "
-        "FROM entities WHERE name=?",
+        f"SELECT {_DETAIL_COLS} FROM entities WHERE name=?",
         (name,),
     )
     row = await cur.fetchone()
     if not row:
         return None
-    return {
-        "name": row["name"],
-        "type": row["type"],
-        "content": row["content"] or "",
-        "relations": json.loads(row["relations"] or "[]"),
-        "properties": json.loads(row["properties"] or "{}"),
-        "importance": row["importance"],
-        "pinned": bool(row["pinned"]),
-        "is_root": bool(row["is_root"]),
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-        "deprecated_at": row["deprecated_at"],
-    }
+    return _row_to_detail(row)

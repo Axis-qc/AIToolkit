@@ -2,9 +2,13 @@
 from . import graph
 
 
-async def search(query: str, top_k: int = 5) -> list[dict]:
-    """搜索图谱，返回原始结果列表。"""
-    return await graph.search_entities(query, top_k)
+async def search(query: str, top_k: int = 5, with_diagnostics: bool = True) -> list[dict]:
+    """搜索图谱，返回原始结果列表。
+
+    with_diagnostics=True（默认）时每条结果额外带 score 与 matched_fields，
+    用于判断两个相似实体是否在互相抢位、以及整理后检索是否真的改善。
+    """
+    return await graph.search_entities(query, top_k, with_diagnostics=with_diagnostics)
 
 
 async def list_pinned() -> list[dict]:
@@ -15,6 +19,144 @@ async def list_pinned() -> list[dict]:
 async def get_entity(name: str) -> dict | None:
     """精准匹配读取单个实体的完整字段。"""
     return await graph.get_entity_detail(name)
+
+
+async def get_entities(names: list[str]) -> dict:
+    """批量读取实体完整字段（含 content 与时间戳）。
+
+    替代逐条 get_entity：641 个实体判断过时不必再调几百次。
+    返回 found 与 missing 两份，缺失的名字明确列出，不静默跳过。
+    """
+    if not names:
+        return {"found": [], "missing": [], "found_count": 0, "missing_count": 0, "requested_count": 0}
+    ordered = list(dict.fromkeys(names))
+    found = await graph.get_entities_by_names(names)
+    found_names = {e["name"] for e in found}
+    missing = [n for n in ordered if n not in found_names]
+    return {
+        "requested_count": len(ordered),
+        "found": found,
+        "found_count": len(found),
+        "missing": missing,
+        "missing_count": len(missing),
+    }
+
+
+async def list_entities(
+    offset: int = 0,
+    limit: int = 100,
+    entity_type: str | None = None,
+    include_content: bool = True,
+) -> dict:
+    """分页列出实体，默认带 content，用于分批判断过时。"""
+    return await graph.list_entities_paged(
+        offset=offset, limit=limit, entity_type=entity_type, include_content=include_content
+    )
+
+
+async def health(
+    checks: list[str] | None = None,
+) -> dict:
+    """图谱体检：一次返回重复候选、过时台账、类型碎片、悬空关系、lint 违规。
+
+    checks 为空则全查，可选 duplicates / stale / types / dangling / lint。
+    只读，不改任何数据。
+    """
+    return await graph.health_check(checks)
+
+
+async def mark_verified(
+    names: list[str],
+    verified_until: str | None = None,
+    stale_marked_at: str | None = None,
+    clear: bool = False,
+) -> str:
+    """批量写入或清除实体的过时标注（结构化字段，不写正文）。
+
+    标注落在 stale_marked_at / verified_until 两列，
+    体检和清理都直接查字段，不再靠 content 里写【待验证】再文本匹配。
+    clear=True 表示核实无误，去掉标注。
+    """
+    if not names:
+        return "错误：names 为空"
+    applied: list[str] = []
+    missing: list[str] = []
+    for name in dict.fromkeys(names):
+        ok = await graph.set_stale_mark(
+            name,
+            stale_marked_at=stale_marked_at,
+            verified_until=verified_until,
+            clear=clear,
+        )
+        if ok:
+            applied.append(name)
+        else:
+            missing.append(name)
+    action = "清除过时标注" if clear else "写入过时标注"
+    parts = [f"已对 {len(applied)} 个实体{action}"]
+    if missing:
+        parts.append(f"未找到 {len(missing)} 个：{'、'.join(missing[:10])}")
+    return "；".join(parts)
+
+
+async def batch_update(
+    names: list[str],
+    new_type: str | None = None,
+    importance: int | None = None,
+    stale_marked_at: str | None = None,
+    verified_until: str | None = None,
+    clear_stale: bool = False,
+    soft_delete: bool = False,
+) -> str:
+    """批量修改实体：重设类型 / 打标注 / 设重要度 / 软删除。
+
+    整理天生是批量的，一次处理一批目标，替代逐条 update_memory。
+    """
+    if not names:
+        return "错误：names 为空"
+    if not any([new_type, importance is not None, stale_marked_at, verified_until, clear_stale, soft_delete]):
+        return "错误：没有指定任何要修改的字段"
+    result = await graph.batch_update_entities(
+        names,
+        new_type=new_type,
+        importance=importance,
+        stale_marked_at=stale_marked_at,
+        verified_until=verified_until,
+        clear_stale=clear_stale,
+        soft_delete=soft_delete,
+    )
+    actions = []
+    if new_type:
+        actions.append(f"类型改为 {new_type}")
+    if importance is not None:
+        actions.append(f"重要度改为 {importance}")
+    if clear_stale:
+        actions.append("清除过时标注")
+    elif stale_marked_at or verified_until:
+        actions.append("写入过时标注")
+    if soft_delete:
+        actions.append("软删除")
+    parts = [f"已对 {result['applied_count']} 个实体执行：{'、'.join(actions)}"]
+    if result["missing"]:
+        parts.append(f"未找到 {result['missing_count']} 个：{'、'.join(result['missing'][:10])}")
+    return "；".join(parts)
+
+
+async def list_tombstones(kind: str | None = None, limit: int = 200) -> str:
+    """列出已过保留窗口、被物理删除的内容（墓地）。"""
+    items = await graph.list_tombstones(kind=kind, limit=limit)
+    if not items:
+        return "墓地为空（还没有内容被清理，或本次清理未含任何到期条目）"
+    lines = [f"已清理内容 {len(items)} 条（保留窗口 {graph.retention_hours()} 小时）"]
+    for it in items:
+        if it["kind"] == "entity":
+            lines.append(f"- [实体/{it['type']}] {it['ref']}（作废于 {it['deprecated_at']}，清理于 {it['purged_at']}）")
+        elif it["kind"] == "fact":
+            lines.append(f"- [事实/{it['type']}] #{it['ref']} {it['content'][:60]}（清理于 {it['purged_at']}）")
+        else:
+            detail = it["detail"]
+            lines.append(f"- [关系] {detail.get('from')} → {detail.get('to')}（{detail.get('rel_type')}）")
+    return "\n".join(lines)
 
 
 async def save(
@@ -239,9 +381,58 @@ async def update(target_type: str, target: str, updates: dict) -> str:
         return f"未知的更新目标类型: {target_type}，支持: fact / entity / entity_importance / entity_pinned / entity_root"
 
 
-async def merge(source: str, target: str) -> str:
-    """将源实体合并到目标实体。"""
+async def merge(source: str, target: str, preview: bool = False) -> str:
+    """将源实体合并到目标实体。
+
+    preview=True 时只干跑，返回会迁走哪些关系、哪些事实、属性有无冲突，不落库。
+    正式执行时走的也是同一份计划，保证预览与执行一致。
+    """
     try:
+        if preview:
+            plan = await graph.preview_merge(source, target)
+            if not plan.get("ok"):
+                return plan.get("error", "无法预览合并")
+            return _format_merge_preview(plan)
         return await graph.merge_entities(source, target)
     except Exception as e:
         return f"(无法合并实体: {e})"
+
+
+def _format_merge_preview(plan: dict) -> str:
+    """把合并计划排版成可直接阅读的干跑报告。"""
+    lines = [
+        f"合并干跑：「{plan['source']['name']}」→「{plan['target']['name']}」（未写入任何数据）",
+        f"源实体：type={plan['source']['type']}，重要度 {plan['source']['importance']}，"
+        f"内容 {plan['source']['content_length']} 字{'（有内容，合并后会随源实体作废）' if plan['source_content_lost'] else '（内容为空）'}",
+        f"目标实体：type={plan['target']['type']}，重要度 {plan['target']['importance']}",
+    ]
+    if plan["type_conflict"]:
+        lines.append(
+            f"类型冲突：源 {plan['source']['type']} 与目标 {plan['target']['type']} 不同，"
+            "合并后源类型丢失，需确认是否本就同类"
+        )
+    lines.append(
+        f"关系：将迁走 {plan['relations_to_move_count']} 条，"
+        f"目标已有 {plan['relations_already_present_count']} 条重复（跳过）"
+    )
+    for r in plan["relations_to_move"][:20]:
+        lines.append(f"  + {plan['source']['name']} → {r.get('name')}（{r.get('rel', '')}）")
+    lines.append(f"入边：{plan['inbound_relations_count']} 条指向源实体的关系将改指目标")
+    for r in plan["inbound_relations"][:10]:
+        lines.append(f"  ~ {r['from']} → {plan['source']['name']}（{r['rel_type']}）")
+    lines.append(f"事实：{plan['facts_to_move_count']} 条将改挂到目标实体")
+    for f in plan["facts_to_move"][:10]:
+        lines.append(f"  + #{f['id']} {f['content'][:70]}")
+    lines.append(f"属性：新增 {plan['properties_to_add_count']} 项")
+    for k, v in list(plan["properties_to_add"].items())[:10]:
+        lines.append(f"  + {k} = {v}")
+    if plan["properties_conflict_count"]:
+        lines.append(f"属性冲突 {plan['properties_conflict_count']} 项（保留目标值）：")
+        for k, v in list(plan["properties_conflict"].items())[:10]:
+            lines.append(f"  ! {k}：源 {v['source']!r} / 目标 {v['target']!r}")
+    if plan["importance_after"] != plan["importance_before"]:
+        lines.append(f"重要度：{plan['importance_before']} → {plan['importance_after']}（取高值）")
+    if plan["pinned_after"] and not plan["target"]["pinned"]:
+        lines.append("固定状态：源实体已固定，目标将变为固定")
+    lines.append(f"最后一步：软删除源实体「{plan['source']['name']}」")
+    return "\n".join(lines)

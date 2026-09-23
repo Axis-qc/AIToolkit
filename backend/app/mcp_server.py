@@ -165,7 +165,11 @@ async def get_entity(
 
 @mcp.tool(
     name="search_memory",
-    description="搜索知识图谱中的长期记忆。返回与查询相关的实体、关系和事实。"
+    description=(
+        "搜索知识图谱中的长期记忆。返回与查询相关的实体、关系和事实。"
+        "结果带 score（检索得分）与 matched_fields（哪个字段贡献了多少分、命中了哪些词），"
+        "用于判断两个相似实体是否在互相抢位，以及整理后检索是否真的改善。"
+    )
 )
 async def search_memory(query: str, top_k: int = 5) -> list[dict]:
     """MCP 工具入口 —— 搜索图谱记忆。"""
@@ -285,16 +289,18 @@ async def update_memory(
     description=(
         "将源实体合并到目标实体。迁移源实体的所有关系、事实关联和属性到目标实体，"
         "然后软删除源实体。可用于消除重复实体、重组图谱结构。"
-        "合并后可用 update_memory 微调目标实体的属性。"
+        "建议先用 preview=true 干跑：返回会迁走哪些关系、哪些事实、属性有无冲突，"
+        "以及类型是否冲突，确认后再正式执行。合并后可用 update_memory 微调目标实体的属性。"
     )
 )
 async def merge_entities(
     source: str = Field(description="源实体名称（将被合并到目标实体后删除）"),
     target: str = Field(description="目标实体名称（接收所有迁移数据）"),
+    preview: bool = Field(default=False, description="是否只干跑预览，不写入任何数据"),
 ) -> str:
     """MCP 工具入口 —— 合并两个实体。"""
     try:
-        return await mem.merge(source, target)
+        return await mem.merge(source, target, preview=preview)
     except Exception as e:
         return f"(无法合并实体: {e})"
 
@@ -321,7 +327,7 @@ async def restore_memory(
 
 @mcp.tool(
     name="list_deprecated",
-    description="列出所有已软删除待清理的实体和事实（24h 后自动物理删除）。"
+    description="列出所有已软删除待清理的实体和事实（超过保留窗口后自动物理删除）。"
 )
 async def list_deprecated_tool() -> str:
     """MCP 工具入口 —— 列出已作废内容。"""
@@ -329,3 +335,146 @@ async def list_deprecated_tool() -> str:
         return await mem.list_deprecated()
     except Exception as e:
         return f"(无法列出已作废内容: {e})"
+
+
+@mcp.tool(
+    name="graph_health_check",
+    description=(
+        "知识图谱体检：一次调用返回五类问题的清单，每条都带可判定证据，只读不改数据。"
+        "duplicates 重复候选（以 content 字符二元组余弦为主信号，分高置信与待观察两档，"
+        "名字相似度只作辅助证据）；"
+        "stale 过时台账（90/180 两档，并单列时间戳缺失与格式非法的实体）；"
+        "types 类型碎片与单例清单（含大小写变体归并建议）；"
+        "dangling 悬空关系清单（指向不存在实体的关系索引，被前端 JOIN 静默丢弃）；"
+        "lint 违规清单（content 必填、环境前缀、装饰符号）。"
+        "checks 为空则全查，也可只跑其中几项，如 ['duplicates','lint']。"
+    )
+)
+async def graph_health_check(
+    checks: list[str] | None = Field(
+        default=None,
+        description="要执行的检查项，可选 duplicates/stale/types/dangling/lint，不传则全查",
+    ),
+) -> dict:
+    """MCP 工具入口 —— 图谱体检。"""
+    try:
+        return await mem.health(checks)
+    except Exception as e:
+        return {"error": f"(无法完成体检: {e})"}
+
+
+@mcp.tool(
+    name="get_entities",
+    description=(
+        "批量读取实体完整字段（含 content 与时间戳）。传入名字数组，一次拿回全部内容，"
+        "替代逐条 get_entity：判断 641 个实体是否过时不必再调几百次。"
+        "返回 found 与 missing 两份，缺失的名字明确列出。"
+    )
+)
+async def get_entities(
+    names: list[str] = Field(description="实体名称数组（精准匹配）"),
+) -> dict:
+    """MCP 工具入口 —— 批量读取实体。"""
+    try:
+        return await mem.get_entities(names)
+    except Exception as e:
+        return {"error": f"(无法批量读取实体: {e})"}
+
+
+@mcp.tool(
+    name="list_entities",
+    description=(
+        "分页列出实体，默认带 content，用于分批遍历全库判断过时。"
+        "返回 total（总数）、offset、limit、items。可用 type 过滤。"
+    )
+)
+async def list_entities(
+    offset: int = Field(default=0, description="起始偏移"),
+    limit: int = Field(default=100, description="每页条数（1-1000）"),
+    type: str | None = Field(default=None, description="按实体类型过滤，不传则全部"),
+    include_content: bool = Field(default=True, description="是否返回 content 字段"),
+) -> dict:
+    """MCP 工具入口 —— 分页列出实体。"""
+    try:
+        return await mem.list_entities(
+            offset=offset, limit=limit, entity_type=type, include_content=include_content
+        )
+    except Exception as e:
+        return {"error": f"(无法列出实体: {e})"}
+
+
+@mcp.tool(
+    name="mark_verified",
+    description=(
+        "批量写入或清除实体的过时标注，落在结构化字段 stale_marked_at/verified_until 上，"
+        "不写正文，因此不靠文本匹配就能查。verified_until 表示核实到哪个日期为止有效，"
+        "体检的过时台账优先按它判定。clear=true 表示核实无误，去掉标注。"
+    )
+)
+async def mark_verified(
+    names: list[str] = Field(description="实体名称数组"),
+    verified_until: str | None = Field(
+        default=None, description="核实截止日期，格式 YYYY:MM:DD:HH:MM:SS，不传则无截止"
+    ),
+    stale_marked_at: str | None = Field(
+        default=None, description="标注时间，不传则取当前系统时间"
+    ),
+    clear: bool = Field(default=False, description="是否清除标注（核实无误时用）"),
+) -> str:
+    """MCP 工具入口 —— 批量写入或清除过时标注。"""
+    try:
+        return await mem.mark_verified(
+            names, verified_until=verified_until, stale_marked_at=stale_marked_at, clear=clear
+        )
+    except Exception as e:
+        return f"(无法写入过时标注: {e})"
+
+
+@mcp.tool(
+    name="batch_update_memory",
+    description=(
+        "批量修改实体：重设类型 / 打标注 / 设重要度 / 软删除，一次处理一批目标。"
+        "整理天生是批量的，此工具替代逐条 update_memory。"
+        "返回 applied 与 missing 两份名单，未找到的不会被静默跳过。"
+    )
+)
+async def batch_update_memory(
+    names: list[str] = Field(description="实体名称数组"),
+    new_type: str | None = Field(default=None, description="统一改成这个类型"),
+    importance: int | None = Field(default=None, ge=1, le=10, description="统一设为这个重要度"),
+    stale_marked_at: str | None = Field(default=None, description="统一打过时标注的时间"),
+    verified_until: str | None = Field(default=None, description="统一设核实截止日期"),
+    clear_stale: bool = Field(default=False, description="统一清除过时标注"),
+    soft_delete: bool = Field(default=False, description="统一软删除（保留窗口内可恢复）"),
+) -> str:
+    """MCP 工具入口 —— 批量修改实体。"""
+    try:
+        return await mem.batch_update(
+            names,
+            new_type=new_type,
+            importance=importance,
+            stale_marked_at=stale_marked_at,
+            verified_until=verified_until,
+            clear_stale=clear_stale,
+            soft_delete=soft_delete,
+        )
+    except Exception as e:
+        return f"(无法批量修改实体: {e})"
+
+
+@mcp.tool(
+    name="list_tombstones",
+    description=(
+        "查看墓地：已过保留窗口、被物理删除的实体、事实与关系。"
+        "用于「我出清单、你确认、再执行」跨天回来后的追溯。"
+    )
+)
+async def list_tombstones(
+    kind: str | None = Field(default=None, description="过滤类型：entity/fact/relation，不传则全部"),
+    limit: int = Field(default=200, description="最多返回条数"),
+) -> str:
+    """MCP 工具入口 —— 查看已清理内容。"""
+    try:
+        return await mem.list_tombstones(kind=kind, limit=limit)
+    except Exception as e:
+        return f"(无法列出已清理内容: {e})"

@@ -164,8 +164,10 @@ async def get_full_graph() -> dict:
     db = await _connect()
 
     # 所有活跃实体
+    # created_at/updated_at 一并返回：前端可用它标记过时，判断过时不必再逐条查详情
     cur = await db.execute(
-        "SELECT name, type, importance, pinned, is_root FROM entities "
+        "SELECT name, type, importance, pinned, is_root, created_at, updated_at, "
+        "stale_marked_at, verified_until FROM entities "
         "WHERE deprecated_at IS NULL ORDER BY importance DESC"
     )
     nodes = []
@@ -177,6 +179,10 @@ async def get_full_graph() -> dict:
             "importance": r["importance"],
             "pinned": bool(r["pinned"]),
             "is_root": bool(r["is_root"]),
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+            "stale_marked_at": r["stale_marked_at"],
+            "verified_until": r["verified_until"],
         })
 
     # 所有活跃关系

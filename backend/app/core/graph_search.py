@@ -66,8 +66,13 @@ def _extract_search_keywords(query: str) -> dict[str, int]:
 # ── 搜索 ────────────────────────────────────────────────
 
 
-async def search_entities(query: str, top_k: int) -> list[dict]:
-    """搜索实体，范围：name + type + content + relations JSON。不再遍历 facts。"""
+async def search_entities(query: str, top_k: int, with_diagnostics: bool = False) -> list[dict]:
+    """搜索实体，范围：name + type + content + relations JSON。不再遍历 facts。
+
+    with_diagnostics=True 时额外返回 score 与 matched_fields，
+    用于判断两个相似实体是否在互相抢位、以及整理后检索是否真的改善。
+    分数在循环里本来就算好了，这里只是把它带出去，不重算。
+    """
     db = await _connect()
     keywords = _extract_search_keywords(query)
     if not keywords:
@@ -89,39 +94,86 @@ async def search_entities(query: str, top_k: int) -> list[dict]:
         props_text = json.dumps(props, ensure_ascii=False).lower()
 
         score = 0
+        # 逐字段累计，同时记录是哪个字段贡献的、贡献了多少、命中了哪些词
+        fields = {
+            "name": {"score": 0, "hits": []},
+            "type": {"score": 0, "hits": []},
+            "content": {"score": 0, "hits": []},
+            "relations": {"score": 0, "hits": []},
+            "properties": {"score": 0, "hits": []},
+        }
         for kw, weight in keywords.items():
             # 名称匹配（权重最高）
             if kw == name_lower:
                 score += 12
+                fields["name"]["score"] += 12
+                fields["name"]["hits"].append(kw)
             elif kw in name_lower or (weight >= 2 and name_lower in kw):
-                score += 10 if weight >= 5 else 6 if weight >= 2 else 3
+                gain = 10 if weight >= 5 else 6 if weight >= 2 else 3
+                score += gain
+                fields["name"]["score"] += gain
+                fields["name"]["hits"].append(kw)
             # 类型匹配
             if kw == type_lower:
                 score += 4
+                fields["type"]["score"] += 4
+                fields["type"]["hits"].append(kw)
             elif kw in type_lower:
-                score += 2 if weight >= 2 else 1
+                gain = 2 if weight >= 2 else 1
+                score += gain
+                fields["type"]["score"] += gain
+                fields["type"]["hits"].append(kw)
             # 内容匹配（替代原来 facts 的职能）
             if kw in content_lower:
-                score += 4 if weight >= 5 else 2 if weight >= 2 else 1
+                gain = 4 if weight >= 5 else 2 if weight >= 2 else 1
+                score += gain
+                fields["content"]["score"] += gain
+                fields["content"]["hits"].append(kw)
             # relations JSON 文本匹配
             if kw in rels_text:
-                score += 2 if weight >= 2 else 1
+                gain = 2 if weight >= 2 else 1
+                score += gain
+                fields["relations"]["score"] += gain
+                fields["relations"]["hits"].append(kw)
             # 属性匹配
             if kw in props_text:
-                score += 2 if weight >= 2 else 1
+                gain = 2 if weight >= 2 else 1
+                score += gain
+                fields["properties"]["score"] += gain
+                fields["properties"]["hits"].append(kw)
 
         if score >= _MIN_SEARCH_SCORE:
-            scored.append((row["name"], row["type"], row["importance"], row["pinned"], score))
+            scored.append((row["name"], row["type"], row["importance"], row["pinned"], score, fields))
 
     scored.sort(key=lambda x: x[4], reverse=True)
 
     if not scored:
         return []
 
-    return [
-        {"entity": name, "type": etype, "importance": imp, "pinned": bool(pin)}
-        for name, etype, imp, pin, _ in scored[:top_k]
-    ]
+    if not with_diagnostics:
+        return [
+            {"entity": name, "type": etype, "importance": imp, "pinned": bool(pin)}
+            for name, etype, imp, pin, _, _ in scored[:top_k]
+        ]
+
+    results = []
+    for name, etype, imp, pin, score, fields in scored[:top_k]:
+        # 只保留真正得分的字段，避免噪声
+        matched = {
+            f: {"score": d["score"], "hits": d["hits"]}
+            for f, d in fields.items() if d["score"] > 0
+        }
+        top_field = max(matched.items(), key=lambda kv: kv[1]["score"])[0] if matched else None
+        results.append({
+            "entity": name,
+            "type": etype,
+            "importance": imp,
+            "pinned": bool(pin),
+            "score": score,
+            "matched_fields": matched,
+            "top_field": top_field,
+        })
+    return results
 
 
 async def get_pinned_entities() -> list[dict]:
