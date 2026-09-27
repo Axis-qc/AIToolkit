@@ -24,9 +24,12 @@ AIToolkit/
 │   │   ├── api/graph.py       # 图谱 REST 端点，直调 core/memory
 │   │   ├── core/
 │   │   │   ├── db.py          # SQLite 连接 + init_db + 自动清理
-│   │   │   ├── graph.py       # Facade（re-export graph_crud/search/view）
-│   │   │   ├── graph_crud.py  # 实体/关系/事实 CRUD、软删除、合并、邻域 BFS
-│   │   │   ├── graph_search.py # 搜索引擎（CJK 分词 + 权重计分）
+│   │   │   ├── graph.py       # Facade（re-export graph_crud/semantic_search/recall/view）
+│   │   │   ├── graph_crud.py  # 实体/关系/事实 CRUD、软删除、合并、邻域 BFS、pinned 实体
+│   │   │   ├── embedding.py   # 本地 ONNX 嵌入模型（Qwen3-Embedding-0.6B，1024 维）
+│   │   │   ├── semantic_search.py # 纯向量语义检索（原始文本 → 全库余弦）
+│   │   │   ├── recall.py      # 意向检索（选择式选取 + 向量臂降级）
+│   │   │   ├── intent.py      # 选择式选取（把条目名当选项让模型挑）
 │   │   │   ├── graph_view.py  # 前端可视化专用查询
 │   │   │   ├── memory.py      # 业务编排（格式化 + 调 graph 子模块）
 │   │   │   ├── config.py      # pydantic-settings 配置
@@ -64,14 +67,14 @@ AIToolkit/
 ## 架构约定
 - 知识图谱记忆 = MCP 工具（function call），非外部 pipeline
 - MCP 端点直调 `core/memory`，REST 端点直调 `core/memory`
-- `core/graph.py` 是 facade，实际逻辑拆分在 `graph_crud/search/view/db` 四个模块
+- `core/graph.py` 是 facade，实际逻辑拆分在 `graph_crud/semantic_search/recall/view/db` 五个模块；字面检索引擎（graph_search.py）与生成式抽词链已删除，检索只走向量
 - 前端仅用于知识图谱可视化，无 LLM 聊天功能
 - 所有地址用 `127.0.0.1`，不用 `localhost`（Windows IPv6 问题）
 - 前端无 emoji，暗色主题，左侧栏悬停展开，`v-text` 不用 `v-html`
 - 前端无 emoji，暗色主题，左侧栏悬停展开，`v-text` 不用 `v-html`
 
 ## 数据流原则
-- **点到点直通**：MCP/REST 端点 → `core/memory` 编排 → `core/graph.crud|search|view` → `core/db` → SQLite
+- **点到点直通**：MCP/REST 端点 → `core/memory` 编排 → `core/graph.crud|semantic_search|recall|view` → `core/db` → SQLite
 - 前端仅用于知识图谱可视化，直接消费 `/api/graph/*` REST 数据
 
 ## 已知坑
