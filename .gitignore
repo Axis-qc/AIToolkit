@@ -26,6 +26,8 @@ logs/
 # ── 临时文件 ──
 backend/_temp_*
 backend/scripts/
+backend/_backup_*
+backend/tests/
 
 # ── 根目录杂项 ──
 memory.jsonl
