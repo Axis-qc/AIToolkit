@@ -4,7 +4,7 @@
 """
 import asyncio
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import aiosqlite
@@ -17,24 +17,26 @@ _db_lock = asyncio.Lock()
 
 # ── 时间戳规范 ──────────────────────────────────────────
 # 写入统一用冒号格式，取值一律走 now_ts()，不在各模块自己拼 now。
+# 存的是本机本地时间，格式不带时区标记；读取侧 parse_ts 按本地时间解读。
+# 写入与读取必须成对修改，只改一侧会产生固定时差（历史上这里存的是 UTC）。
 TS_FORMAT = "%Y:%m:%d:%H:%M:%S"
 TS_FALLBACK_FORMAT = "%Y:%m:%d:%H:%M:%S.%f"
 
 
 def now_ts() -> str:
-    """当前 UTC 时间的规范时间戳字符串（冒号格式）。
+    """当前本地时间的规范时间戳字符串（冒号格式）。
 
     所有写入路径统一调这里，不再各模块自己 strftime。
     """
-    return datetime.now(timezone.utc).strftime(TS_FORMAT)
+    return datetime.now().strftime(TS_FORMAT)
 
 
 def parse_ts(value: str | None) -> datetime | None:
     """解析时间戳，兼容历史遗留格式，失败返回 None。
 
-    支持：冒号格式（现行规范）、带微秒的冒号格式、ISO 8601
-    （旧数据里有 10 个实体的 created_at 和 285 条 facts.ts 是这种）。
-    返回带 UTC 时区的 datetime，便于直接做日期比较。
+    支持：冒号格式（现行规范，按本地时间解读）、带微秒的冒号格式、ISO 8601
+    （历史数据带时区偏移，换算成本地时间后返回）。
+    返回不带时区信息的本地时间 datetime，便于直接与 datetime.now() 比较。
     """
     if not value or not isinstance(value, str):
         return None
@@ -43,15 +45,15 @@ def parse_ts(value: str | None) -> datetime | None:
         return None
     for fmt in (TS_FORMAT, TS_FALLBACK_FORMAT):
         try:
-            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(text, fmt)
         except ValueError:
             pass
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
     return parsed
 
 
@@ -258,7 +260,7 @@ async def cleanup_expired():
     """
     db = await _connect()
     hours = retention_hours()
-    deadline = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(TS_FORMAT)
+    deadline = (datetime.now() - timedelta(hours=hours)).strftime(TS_FORMAT)
     purged_at = now_ts()
 
     # 实体：先入墓再删

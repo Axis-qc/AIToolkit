@@ -10,7 +10,7 @@ import json
 import math
 import re
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime
 
 from .config import settings
 from .db import _connect, parse_ts, retention_hours
@@ -165,7 +165,7 @@ async def find_stale_entries() -> dict:
     )
     rows = await cur.fetchall()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now()
     warn_days = settings.stale_days_warn
     alert_days = settings.stale_days_alert
 
