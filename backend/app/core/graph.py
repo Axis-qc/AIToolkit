@@ -6,8 +6,10 @@
 
 内部结构：
   core/db.py             → DB 连接、init_db、close、cleanup_expired
-  core/graph_crud.py     → 实体/关系/事实 CRUD、软删除、恢复、合并、邻域查询、关系索引维护
-  core/graph_search.py   → 搜索引擎、pinned 实体查询
+  core/graph_crud.py     → 实体/关系/事实 CRUD、软删除、恢复、合并、邻域查询、关系索引维护、pinned 实体查询
+  core/embedding.py      → 本地嵌入模型（向量化），模型缓存限定在工作区内
+  core/semantic_search.py → 纯向量语义检索（原始文本 → 全库余弦）
+  core/recall.py         → 意向检索（选择式选取 + 向量臂降级）
   core/graph_view.py     → 前端可视化专用查询（roots/children/facts/orphans/full_graph）
 """
 
@@ -58,15 +60,22 @@ from .graph_crud import (
     preview_merge,
     get_entity_neighborhood,
     get_entity_detail,
+    get_pinned_entities,
     refresh_relation_index,
     rebuild_relation_index,
     migrate_from_old_schema,
 )
 
-# 搜索
-from .graph_search import (
-    search_entities,
-    get_pinned_entities,
+# 语义检索（纯向量）
+from .semantic_search import (
+    semantic_search,
+)
+
+# 意向检索（选择式选取 + 向量臂降级）
+from .recall import (
+    recall,
+    backfill,
+    refresh_embeddings,
 )
 
 # 体检

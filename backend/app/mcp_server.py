@@ -164,19 +164,90 @@ async def get_entity(
 
 
 @mcp.tool(
-    name="search_memory",
+    name="semantic_search",
     description=(
-        "搜索知识图谱中的长期记忆。返回与查询相关的实体、关系和事实。"
-        "结果带 score（检索得分）与 matched_fields（哪个字段贡献了多少分、命中了哪些词），"
-        "用于判断两个相似实体是否在互相抢位，以及整理后检索是否真的改善。"
+        "语义检索：把用户原始文本交给本地嵌入模型（Qwen3-Embedding-0.6B，1024 维），"
+        "与全库实体向量算余弦，按相似度降序返回。不切词、不做字面包含匹配、不与其他臂融合。"
+        "与 recall_for_turn 的区别是它不过阈值、不截断，返回完整排序，"
+        "既能当通用语义检索入口，也能用来检查召回效果。"
+        "min_cosine 默认 0.0 表示不过滤；阈值档位随模型变过，换模型后需重新标定，"
+        "不要沿用 bge 时代的 0.45/0.52/0.60。"
+        "模型不可用时返回带 model_available=false 的错误项，不返回空数组。"
     )
 )
-async def search_memory(query: str, top_k: int = 5) -> list[dict]:
-    """MCP 工具入口 —— 搜索图谱记忆。"""
+async def semantic_search(
+    query: str = Field(description="用户原始文本，不做任何预处理，直接进模型"),
+    top_k: int = Field(default=10, description="返回条数上限"),
+    min_cosine: float = Field(
+        default=0.0,
+        description="最低余弦相似度，默认 0.0（不过滤）；线上三档为 0.45/0.52/0.60",
+    ),
+    with_diagnostics: bool = Field(default=True, description="是否返回 arms 与 vector_arm 摘要"),
+) -> list[dict]:
+    """MCP 工具入口 —— 纯向量语义检索。"""
     try:
-        return await mem.search(query, top_k)
+        return await mem.semantic_search(
+            query, top_k=top_k, min_cosine=min_cosine, with_diagnostics=with_diagnostics
+        )
     except Exception as e:
-        return [{"error": f"(无法检索记忆: {e})"}]
+        return [{"error": f"(无法语义检索: {e})"}]
+
+
+@mcp.tool(
+    name="recall_for_turn",
+    description=(
+        "意向检索：接收用户原话，返回该轮真正相关的记忆实体，供对话开始前自动注入。"
+        "与 semantic_search 的区别是它面向「自动注入」而非「查询」："
+        "服务端把图谱全部条目名作为选项交给模型挑选（选择式），挑中即直接返回；"
+        "模型不可用时降级为只用原话走向量臂并套用线上阈值。"
+        "keywords 一般不用传——留空即由服务端自动选取；"
+        "传空数组表示「明确判定本轮无需检索」（阈值提到最高档 0.60）；"
+        "传非空数组已无实际作用（字面检索引擎已删除，那些词没有消费者），"
+        "服务端会照常走向量检索并在返回的 intent.ignored_keywords 里如实标出。"
+        "返回项带 arms 字段说明来源，首条带 intent 字段说明选取结果与失败原因。"
+    )
+)
+async def recall_for_turn(
+    user_text: str = Field(description="用户这一轮的原话，服务端据此选取条目并做语义召回"),
+    keywords: list[str] | None = Field(
+        default=None,
+        description=(
+            "可选。留空（默认）表示由服务端自动选取；"
+            "传空数组表示明确判定本轮无需检索；"
+            "传非空数组无实际作用（字面引擎已删），会在 intent.ignored_keywords 里被标出"
+        ),
+    ),
+    top_k: int = Field(default=5, description="返回条数上限"),
+    with_diagnostics: bool = Field(default=True, description="是否返回 arms（来源诊断信息）"),
+) -> list[dict]:
+    """MCP 工具入口 —— 意向检索。
+
+    注意 keywords 默认必须是 None 而不是 []：FastMCP 在调用方不传该参数时
+    会填默认值，若默认是 []，recall() 会把它理解成「调用方明确判定无需检索」
+    从而跳过自动抽词（实测踩过：keywords_used 恒为空、抽词完全不生效）。
+    """
+    try:
+        return await mem.recall(
+            user_text, keywords=keywords, top_k=top_k, with_diagnostics=with_diagnostics
+        )
+    except Exception as e:
+        return [{"error": f"(无法意向检索: {e})"}]
+
+
+@mcp.tool(
+    name="backfill_embeddings",
+    description=(
+        "回填/刷新实体向量，供意向检索的语义臂使用。"
+        "只对正文指纹变化的实体重算，因此可重复调用。"
+        "返回 checked/updated/failed/skipped_empty 统计。"
+    )
+)
+async def backfill_embeddings() -> dict:
+    """MCP 工具入口 —— 回填向量索引。"""
+    try:
+        return await mem.backfill_embeddings()
+    except Exception as e:
+        return {"error": f"(无法回填向量: {e})"}
 
 
 @mcp.tool(
@@ -212,7 +283,7 @@ async def save_to_graph(
     description=(
         "分层浏览知识图谱。无参数时返回类型概览（如 User (3个)）；"
         "传入 type 时列出该类型下所有实体标题和子节点数。"
-        "只显示骨架，详细内容用 search_memory 获取。"
+        "只显示骨架，详细内容用 get_entity 获取。"
     )
 )
 async def list_memory(

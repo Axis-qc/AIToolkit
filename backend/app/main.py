@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from app.core import graph
+from app.core import intent
 from app.core import logger
 from app import mcp_server
 from app.api.graph import router as graph_router
@@ -20,6 +21,8 @@ async def lifespan(app: FastAPI):
     async with mcp_server.mcp.session_manager.run():
         yield
     await graph.close()
+    # 收尾抽词复用的 HTTP 连接（见 core/intent.py）
+    await intent.close_client()
     logger.close()
 
 

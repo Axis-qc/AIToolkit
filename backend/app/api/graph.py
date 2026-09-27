@@ -1,6 +1,6 @@
 """
 图谱 REST 端点 —— 为前端可视化提供数据。
-直调 core/graph（实际转发到 graph_crud / graph_view / graph_search），
+直调 core/graph（实际转发到 graph_crud / graph_view），
 不包含业务逻辑，仅做 HTTP 转接。
 """
 from fastapi import APIRouter, Query

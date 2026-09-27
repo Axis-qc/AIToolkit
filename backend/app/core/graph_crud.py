@@ -1050,6 +1050,42 @@ async def get_entity_neighborhood(entity_name: str, depth: int = 2) -> dict:
     }
 
 
+# ── 固定注入实体 ─────────────────────────────────────────
+
+
+async def get_pinned_entities() -> list[dict]:
+    """获取所有固定注入的实体（完整字段，按重要度降序）。
+
+    原先放在 graph_search.py，随字面检索引擎一并删除后迁到这里：
+    它是固定记忆注入通道的来源，与检索算法无关，不随检索方式改变。
+    """
+    db = await _connect()
+    cur = await db.execute(
+        "SELECT name, type, content, relations, properties, importance, pinned "
+        "FROM entities WHERE pinned=1 AND deprecated_at IS NULL ORDER BY importance DESC"
+    )
+    result = []
+    for r in await cur.fetchall():
+        try:
+            relations = json.loads(r["relations"]) if r["relations"] else []
+        except (json.JSONDecodeError, TypeError):
+            relations = []
+        try:
+            properties = json.loads(r["properties"]) if r["properties"] else {}
+        except (json.JSONDecodeError, TypeError):
+            properties = {}
+        result.append({
+            "entity": r["name"],
+            "type": r["type"],
+            "content": r["content"],
+            "relations": relations,
+            "properties": properties,
+            "importance": r["importance"],
+            "pinned": bool(r["pinned"]),
+        })
+    return result
+
+
 # ── 实体详情查询 ─────────────────────────────────────────
 
 

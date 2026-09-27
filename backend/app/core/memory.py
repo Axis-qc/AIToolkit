@@ -1,19 +1,56 @@
-# 知识图谱业务编排层：协调搜索、CRUD 操作，返回原始数据
+# 知识图谱业务编排层：协调检索、CRUD 操作，返回原始数据
 from . import graph
 
 
-async def search(query: str, top_k: int = 5, with_diagnostics: bool = True) -> list[dict]:
-    """搜索图谱，返回原始结果列表。
+async def semantic_search(
+    query: str,
+    top_k: int = 10,
+    min_cosine: float = 0.0,
+    with_diagnostics: bool = True,
+) -> list[dict]:
+    """语义检索：把用户原始文本交给嵌入模型，返回全库余弦降序结果。
 
-    with_diagnostics=True（默认）时每条结果额外带 score 与 matched_fields，
-    用于判断两个相似实体是否在互相抢位、以及整理后检索是否真的改善。
+    默认不设阈值、不截断，便于查看完整排序；min_cosine 传 0.45/0.52/0.60
+    可复现线上注入通道的三个档位。
     """
-    return await graph.search_entities(query, top_k, with_diagnostics=with_diagnostics)
+    return await graph.semantic_search(
+        query, top_k=top_k, min_cosine=min_cosine, with_diagnostics=with_diagnostics
+    )
 
 
 async def list_pinned() -> list[dict]:
     """列出所有固定（pinned）注入的实体，按重要度降序，含完整字段。"""
     return await graph.get_pinned_entities()
+
+
+async def recall(
+    user_text: str,
+    keywords: list[str] | None = None,
+    top_k: int = 5,
+    with_diagnostics: bool = True,
+    auto_extract: bool = True,
+) -> list[dict]:
+    """意向检索：接收用户原话，返回该轮相关的记忆实体。
+
+    与 semantic_search 的区别：semantic_search 是纯向量、不过阈值、按余弦
+    原样返回，适合排查与实验；recall 是自动注入通道，主路径由服务端把全部
+    条目名交给模型挑（选择式），不可用时降级为只用原话走向量臂并套用线上阈值。
+
+    keywords 传 None 且 auto_extract=True 时走选择式；传空数组表示「明确判定
+    无需检索」，向量臂按最高档阈值放行；传非空数组已无消费者（字面臂已删）。
+    """
+    return await graph.recall(
+        user_text,
+        keywords=keywords,
+        top_k=top_k,
+        with_diagnostics=with_diagnostics,
+        auto_extract=auto_extract,
+    )
+
+
+async def backfill_embeddings() -> dict:
+    """回填实体向量。指纹未变的实体会被跳过，可重复调用。"""
+    return await graph.backfill()
 
 
 async def get_entity(name: str) -> dict | None:

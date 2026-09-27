@@ -6,3 +6,9 @@ pydantic-settings
 pyyaml
 mcp>=1.0.0
 paramiko
+
+# 语义检索：本地 ONNX 嵌入模型（纯 CPU，不依赖 PyTorch）。
+# 模型文件首次使用时下载到 backend/data/models/，不写用户目录。
+# 缺失时 core/embedding.py 会懒加载失败，语义检索如实上报 model_available=false，
+# 注入通道降级为不注入，后端仍可启动。
+fastembed>=0.8.1

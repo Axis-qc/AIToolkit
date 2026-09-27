@@ -97,7 +97,8 @@ async def init_db():
             is_root INTEGER NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT NULL,
             updated_at TEXT DEFAULT NULL,
-            deprecated_at TEXT DEFAULT NULL
+            deprecated_at TEXT DEFAULT NULL,
+            embedding TEXT DEFAULT NULL
         );
         CREATE TABLE IF NOT EXISTS relation_index (
             entity_name TEXT NOT NULL,
@@ -192,6 +193,13 @@ async def init_db():
             await db.execute(f"ALTER TABLE entities ADD COLUMN {col} TEXT DEFAULT NULL")
         except Exception:
             pass
+    # ── 语义检索向量列 ──
+    # 既有库（2026-09 之前建的）早已带这一列但源码里没有，
+    # 这里补齐建表与迁移，否则从源码重建的库会少这一列、新旧库行为不一致。
+    try:
+        await db.execute("ALTER TABLE entities ADD COLUMN embedding TEXT DEFAULT NULL")
+    except Exception:
+        pass
     try:
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_entities_stale ON entities(stale_marked_at)
