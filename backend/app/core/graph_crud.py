@@ -83,25 +83,31 @@ async def update_entity(
             raise ValueError(f"目标名称「{new_name}」已被其他实体占用")
 
         # 1. 主表改名（INSERT 新行 + DELETE 旧行，因为 PRIMARY KEY 不可 UPDATE）
+        # 注意：这里是显式列清单，新增实体列必须同步加进来。此前的清单漏了
+        # stale_marked_at / verified_until / embedding，会导致改名时这些列被
+        # 静默清空（实测确认：改名后带向量的实体 671→670）。改为按表的实际
+        # 列动态复制，只覆盖确实要改的列，以后新增列不会再漏。
         rename_is_root = int(new_is_root) if new_is_root is not None else None
+        overrides: dict[str, object] = {"updated_at": now}
         if rename_is_root is not None:
-            await db.execute(
-                "INSERT INTO entities (name, type, content, relations, properties, "
-                "importance, pinned, is_root, created_at, updated_at, deprecated_at) "
-                "SELECT ?, type, content, relations, properties, "
-                "importance, pinned, ?, created_at, ?, deprecated_at "
-                "FROM entities WHERE name=?",
-                (new_name, rename_is_root, now, name),
-            )
-        else:
-            await db.execute(
-                "INSERT INTO entities (name, type, content, relations, properties, "
-                "importance, pinned, is_root, created_at, updated_at, deprecated_at) "
-                "SELECT ?, type, content, relations, properties, "
-                "importance, pinned, is_root, created_at, ?, deprecated_at "
-                "FROM entities WHERE name=?",
-                (new_name, now, name),
-            )
+            overrides["is_root"] = rename_is_root
+
+        cur_cols = await db.execute("PRAGMA table_info(entities)")
+        copied = [r[1] for r in await cur_cols.fetchall() if r[1] != "name"]
+        select_parts: list[str] = []
+        select_params: list = []
+        for col in copied:
+            if col in overrides:
+                select_parts.append("?")
+                select_params.append(overrides[col])
+            else:
+                select_parts.append(col)
+
+        await db.execute(
+            f"INSERT INTO entities (name, {', '.join(copied)}) "
+            f"SELECT ?, {', '.join(select_parts)} FROM entities WHERE name=?",
+            (new_name, *select_params, name),
+        )
         await db.execute("DELETE FROM entities WHERE name=?", (name,))
 
         # 2. relation_index：出边 entity_name
