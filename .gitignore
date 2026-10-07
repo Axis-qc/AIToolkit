@@ -29,6 +29,10 @@ backend/scripts/
 backend/_backup_*
 backend/tests/
 
+# ── 本地产物（知识实体导出、沙箱 ACL 诊断报告）──
+_wave2_1_dump/
+backend/_acl_reports/
+
 # ── 根目录杂项 ──
 memory.jsonl
 opencode.json
