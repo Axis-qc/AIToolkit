@@ -59,6 +59,11 @@ VECTOR_ARM_DEPTH = 10
 # 结构性约束：不再有字面证据一说，只能靠阈值档位区分输入性质。
 VECTOR_MIN_COSINE = 0.45
 
+# 回填的分块大小。每块独立「编码 → 写回 → commit」，见 _refresh_embeddings_locked。
+# 取 64 是为了让单块编码耗时保持在数秒量级：块太大则崩溃时丢掉的工作多，
+# 块太小则 commit 次数过密、WAL 写放大明显。
+REFRESH_CHUNK_SIZE = 64
+
 # 无字面证据时的门槛：此时没有任何字符级证据，只靠向量最容易把无关
 # 内容塞进上下文。取 0.52 是实测无关输入上界 0.5013 之上、相关召回
 # 下界 0.5092 附近的位置——注意这两条本身有重叠，裕度只有约 0.02，
@@ -179,44 +184,60 @@ async def _refresh_embeddings_locked(names: list[str] | None = None) -> dict:
     if not pending:
         return {"checked": len(rows), "updated": 0, "failed": 0, "skipped_empty": 0}
 
-    texts = [text for _n, _f, text in pending]
-    vectors = emb.encode_texts(texts)
-    if not vectors:
-        # 模型不可用要说清楚，不能报成 failed:0 让调用方以为一切正常
-        reason = emb.last_error() or "embedding model unavailable"
-        logger.warning("backfill skipped: %s", reason)
-        return {
-            "checked": len(rows),
-            "updated": 0,
-            "failed": 0,
-            "skipped_empty": 0,
-            "available": False,
-            "error": reason,
-        }
-
     db = await _connect()
     updated = 0
     failed = 0
     skipped = 0
-    for (name, fingerprint, _text), vector in zip(pending, vectors):
-        if not vector:
-            failed += 1
+
+    # 分块「编码 → 写回 → 提交」：整批只在末尾 commit 一次的话，进程在中途被
+    # 杀（例如外部看门狗超时强杀）会把已算好的向量全部丢掉，重启后待算条数
+    # 分毫未减，于是每次调用都从头再算、永远追不平。分块提交后每次崩溃都能
+    # 净减少一批待算量，回填保证单调收敛。
+    for start in range(0, len(pending), REFRESH_CHUNK_SIZE):
+        chunk = pending[start:start + REFRESH_CHUNK_SIZE]
+        chunk_texts = [text for _n, _f, text in chunk]
+        vectors = await asyncio.to_thread(emb.encode_texts, chunk_texts)
+        if not vectors:
+            # 模型不可用要说清楚，不能报成 failed:0 让调用方以为一切正常
+            reason = emb.last_error() or "embedding model unavailable"
+            logger.warning("backfill stopped: %s", reason)
+            result = {
+                "checked": len(rows),
+                "updated": updated,
+                "failed": failed,
+                "skipped_empty": skipped,
+                "available": False,
+                "error": reason,
+            }
+            return result
+        if len(vectors) != len(chunk):
+            # 条数对不上说明这一批编码结果不可信，宁可整批算失败也不能错位写回
+            failed += len(chunk)
+            logger.warning(
+                "backfill chunk size mismatch: got %d want %d", len(vectors), len(chunk)
+            )
             continue
-        if not any(vector):
-            # 全零向量说明文本为空得连 name 都没有，存了也没用
-            skipped += 1
-            continue
-        cur = await db.execute(
-            "UPDATE entities SET embedding=? WHERE name=?",
-            (_serialize_cell(vector, fingerprint), name),
-        )
-        # 只按实际影响行数计数：命中 0 行（例如实体在读取后被并发改名或作废）
-        # 不能算作已更新，否则统计会谎报成功，掩盖真实失败。
-        if cur.rowcount > 0:
-            updated += 1
-        else:
-            failed += 1
-    await db.commit()
+
+        for (name, fingerprint, _text), vector in zip(chunk, vectors):
+            if not vector:
+                failed += 1
+                continue
+            if not any(vector):
+                # 全零向量说明文本为空得连 name 都没有，存了也没用
+                skipped += 1
+                continue
+            cur = await db.execute(
+                "UPDATE entities SET embedding=? WHERE name=?",
+                (_serialize_cell(vector, fingerprint), name),
+            )
+            # 只按实际影响行数计数：命中 0 行（例如实体在读取后被并发改名或作废）
+            # 不能算作已更新，否则统计会谎报成功，掩盖真实失败。
+            if cur.rowcount > 0:
+                updated += 1
+            else:
+                failed += 1
+        await db.commit()
+
     return {"checked": len(rows), "updated": updated, "failed": failed, "skipped_empty": skipped}
 
 
