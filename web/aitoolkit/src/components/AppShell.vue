@@ -12,7 +12,6 @@ const navItems = [
   { to: '/', label: '总览', key: 'overview' },
   { to: '/graph', label: '知识图谱', key: 'graph' },
   { to: '/tools', label: '网页工具', key: 'tools' },
-  { to: '/mc-panel', label: 'MC 面板', key: 'mc' },
   { to: '/games', label: '小游戏', key: 'games' },
 ]
 </script>
@@ -56,9 +55,6 @@ const navItems = [
             </template>
             <template v-else-if="item.key === 'tools'">
               <path d="m14.7 6.3 3-3 3 3-3 3M4 20l9.7-9.7M13.5 4.5a4.4 4.4 0 0 0-5.7 5.7L3 15v5h5l4.8-4.8a4.4 4.4 0 0 0 5.7-5.7" />
-            </template>
-            <template v-else-if="item.key === 'mc'">
-              <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M7 9h2M7 13h2M15 9h2M15 13h2" />
             </template>
             <template v-else>
               <path d="M4 8h16M6 5h.01M10 5h.01M14 5h.01M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M9 12h6M9 16h4" />

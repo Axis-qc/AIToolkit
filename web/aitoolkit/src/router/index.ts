@@ -20,9 +20,13 @@ const router = createRouter({
       component: () => import('@/views/ToolsView.vue'),
     },
     {
-      path: '/mc-panel',
-      name: 'mc-panel',
+      path: '/tools/mc',
+      name: 'tools-mc',
       component: () => import('@/views/McPanelView.vue'),
+    },
+    {
+      path: '/mc-panel',
+      redirect: '/tools/mc',
     },
     {
       path: '/games',
