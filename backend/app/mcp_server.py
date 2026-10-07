@@ -19,6 +19,7 @@ from starlette.responses import Response
 from starlette.types import Receive, Scope, Send
 
 from app.core import memory as mem
+from app.core import desktop
 
 logger = logging.getLogger(__name__)
 
@@ -580,3 +581,122 @@ async def list_tombstones(
         return await mem.list_tombstones(kind=kind, limit=limit)
     except Exception as e:
         return f"(无法列出已清理内容: {e})"
+
+
+# ============================================================
+# MCP 工具 —— 桌面操作（截屏 / 点击 / 输入）
+# 调用即真实操作本机键鼠与屏幕，坐标均为物理像素，与截图尺寸对应。
+# ============================================================
+
+@mcp.tool(
+    name="take_screenshot",
+    description=(
+        "截取当前整个屏幕并返回图片内容块，可直接看图。"
+        "默认把截图缩放到宽 1280 以省上下文 token，传 max_width=0 返回原生分辨率。"
+        "文本块返回屏幕物理分辨率与图片实际尺寸：点击时把截图上的位置乘以"
+        "（物理宽 / 图片宽）换算成物理像素坐标，再调 click_screen。"
+    )
+)
+async def take_screenshot(
+    max_width: int = Field(default=1280, description="截图缩放目标宽度，0 表示原生分辨率"),
+) -> list:
+    """MCP 工具入口 —— 截屏，返回文本信息 + 图片内容块。"""
+    import anyio
+
+    def _shot():
+        import io
+        import json
+
+        from mcp.server.fastmcp import Image
+        from mcp.types import TextContent
+
+        try:
+            img, info = desktop.take_screenshot(max_width=max_width or None)
+        except Exception as e:
+            return [TextContent(type="text", text=f"截屏失败: {e}")]
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        meta = json.dumps(info, ensure_ascii=False)
+        return [TextContent(type="text", text=meta), Image(data=buf.getvalue(), format="png")]
+
+    return await anyio.to_thread.run_sync(_shot)
+
+
+@mcp.tool(
+    name="click_screen",
+    description=(
+        "把鼠标移动到指定坐标并点击，支持左键单击（默认）、双击、右键、中键。"
+        "默认坐标就是截图坐标：直接传你在最近一次 take_screenshot 返回的图片上"
+        "看到的位置，后端自动按截图与屏幕的比例换算成物理像素，不用自己做乘法。"
+        "传 space=\"physical\" 时坐标为物理像素（与 pyautogui.size() 同一体系）。"
+        "点击前建议先截屏确认目标位置；返回值带换算后的实际物理落点。"
+    )
+)
+async def click_screen(
+    x: int = Field(description="X 坐标（默认为截图上的位置，见 space 说明）"),
+    y: int = Field(description="Y 坐标（默认为截图上的位置，见 space 说明）"),
+    space: str = Field(default="shot", description="坐标空间：shot=最后一次截图上的坐标（默认），physical=物理像素"),
+    button: str = Field(default="left", description="鼠标键：left（默认）/ right / middle"),
+    clicks: int = Field(default=1, description="连点次数：1=单击（默认），2=双击，以此类推"),
+) -> dict:
+    """MCP 工具入口 —— 模拟鼠标点击（左/右/中键，可双击）。"""
+    import anyio
+
+    def _click():
+        try:
+            return desktop.click_screen(x, y, space=space, button=button, clicks=clicks)
+        except Exception as e:
+            return {"error": f"点击失败: {e}"}
+
+    return await anyio.to_thread.run_sync(_click)
+
+
+@mcp.tool(
+    name="scroll_screen",
+    description=(
+        "滚动滚轮。clicks_amount 正数向上滚（内容下移），负数向下滚（内容上移），"
+        "单位是滚轮格数。可传 x/y（默认为截图上的坐标，语义同 click_screen）"
+        "先把鼠标移过去再滚；省略 x/y 则在当前鼠标位置滚动。"
+        "滚列表、网页、缩放画布时先截屏确认再滚。"
+    )
+)
+async def scroll_screen(
+    clicks_amount: int = Field(description="滚轮格数：正数上滚，负数下滚"),
+    x: int | None = Field(default=None, description="可选，滚动位置的 X 坐标（默认为截图上的位置）；省略则在当前鼠标位置滚"),
+    y: int | None = Field(default=None, description="可选，滚动位置的 Y 坐标（默认为截图上的位置）；省略则在当前鼠标位置滚"),
+    space: str = Field(default="shot", description="坐标空间：shot=最后一次截图上的坐标（默认），physical=物理像素"),
+) -> dict:
+    """MCP 工具入口 —— 模拟滚轮滚动。"""
+    import anyio
+
+    def _scroll():
+        try:
+            return desktop.scroll_screen(clicks_amount, x=x, y=y, space=space)
+        except Exception as e:
+            return {"error": f"滚动失败: {e}"}
+
+    return await anyio.to_thread.run_sync(_scroll)
+
+
+@mcp.tool(
+    name="type_text",
+    description=(
+        "向当前焦点窗口输入文本。纯 ASCII 直接逐键输入；含中文或换行时"
+        "经剪贴板粘贴（会临时占用剪贴板，约 1 秒后自动恢复原内容）。"
+        "输入落在当前焦点处，建议先点击目标输入框再调用。"
+    )
+)
+async def type_text(
+    text: str = Field(description="要输入的文本"),
+) -> dict:
+    """MCP 工具入口 —— 模拟键盘输入。"""
+    import anyio
+
+    def _type():
+        try:
+            return desktop.type_text(text)
+        except Exception as e:
+            return {"error": f"输入失败: {e}"}
+
+    return await anyio.to_thread.run_sync(_type)
