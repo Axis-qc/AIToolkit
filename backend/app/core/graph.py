@@ -10,6 +10,7 @@
   core/embedding.py      → 本地嵌入模型（向量化），模型缓存限定在工作区内
   core/semantic_search.py → 纯向量语义检索（原始文本 → 全库余弦）
   core/recall.py         → 意向检索（选择式选取 + 向量臂降级）
+  core/weak_link.py      → 弱关联候选生成（干跑，用向量补「相关」类弱关系）
   core/graph_view.py     → 前端可视化专用查询（roots/children/facts/orphans/full_graph）
 """
 
@@ -86,6 +87,13 @@ from .graph_health import (
     find_type_fragments,
     find_dangling_relations,
     run_lint,
+)
+
+# 弱关联候选（干跑，只读）
+from .weak_link import (
+    weak_links,
+    build_report as weak_link_report,
+    write_report as write_weak_link_report,
 )
 
 # 前端可视化查询

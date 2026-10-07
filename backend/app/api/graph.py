@@ -68,3 +68,23 @@ async def health(
     """图谱体检（只读）：重复候选、过时台账、类型碎片、悬空关系、lint 违规。"""
     parsed = [c.strip() for c in checks.split(",") if c.strip()] if checks else None
     return await graph.health_check(parsed)
+
+
+@router.get("/weak-links")
+async def weak_links(
+    top_k: int | None = Query(None, ge=1, le=100, description="每个实体取多少个最近邻作候选"),
+    min_cosine: float | None = Query(None, ge=0.0, le=1.0, description="候选余弦下限"),
+    auto_cosine: float | None = Query(None, ge=0.0, le=1.0, description="可直接自动写入的余弦下限"),
+    degree_cap: int | None = Query(None, ge=1, le=200, description="单节点弱关联度数上限"),
+    full: bool = Query(False, description="是否返回全量清单（默认只回统计与前 15 条样本）"),
+):
+    """弱关联候选干跑（只读）：用实体向量补「相关」类无向弱关系。
+
+    不改 entities.relations、不写 relation_index、不建表；正文指纹过期的实体
+    会就地重算向量并写回 embedding 列（与 recall 自愈同机制）。完整清单写入
+    backend/data/weak_link_report.json。
+    """
+    return await graph.weak_links(
+        top_k=top_k, min_cosine=min_cosine,
+        auto_cosine=auto_cosine, degree_cap=degree_cap, full=full,
+    )

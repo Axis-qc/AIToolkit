@@ -53,6 +53,24 @@ async def backfill_embeddings() -> dict:
     return await graph.backfill()
 
 
+async def weak_links(
+    top_k: int | None = None,
+    min_cosine: float | None = None,
+    auto_cosine: float | None = None,
+    degree_cap: int | None = None,
+    full: bool = False,
+) -> dict:
+    """弱关联候选干跑：用实体向量补「相关」类无向弱关系，不写库。
+
+    返回阈值扫描表、推荐档统计、hub 清单与三份清单样本；完整清单落在
+    backend/data/weak_link_report.json。传 full=True 直接拿全量清单。
+    """
+    return await graph.weak_links(
+        top_k=top_k, min_cosine=min_cosine,
+        auto_cosine=auto_cosine, degree_cap=degree_cap, full=full,
+    )
+
+
 async def get_entity(name: str) -> dict | None:
     """精准匹配读取单个实体的完整字段。"""
     return await graph.get_entity_detail(name)

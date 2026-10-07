@@ -453,6 +453,37 @@ async def get_entities(
 
 
 @mcp.tool(
+    name="weak_links",
+    description=(
+        "弱关联候选干跑：用实体向量给全库补「相关」类无向弱关系，只读报告，不写库。"
+        "规则是互为最近邻 top_k 且余弦达 min_cosine，剔除已有手写关系，"
+        "疑似重复的实体对分流到重复清单，再做度数上限截断。"
+        "返回阈值扫描表（0.60/0.65/0.70/0.75/0.80 各档的边数与度数分布）、"
+        "推荐档统计、hub 清单与三份清单样本；完整清单写入 "
+        "backend/data/weak_link_report.json。传 full=true 直接拿全量清单。"
+        "注意：余弦只能表达「像」，表达不了关系类型，本通道只产出无语义的「相关」，"
+        "不复用现有关系类型；低于 0.60 不可用（实测会把图冲垮）。"
+        "不改 entities.relations、不写 relation_index、不建表。"
+    )
+)
+async def weak_links(
+    top_k: int | None = Field(default=None, ge=1, le=100, description="每个实体取多少个最近邻作候选"),
+    min_cosine: float | None = Field(default=None, ge=0.0, le=1.0, description="候选余弦下限"),
+    auto_cosine: float | None = Field(default=None, ge=0.0, le=1.0, description="可直接自动写入的余弦下限"),
+    degree_cap: int | None = Field(default=None, ge=1, le=200, description="单节点弱关联度数上限"),
+    full: bool = Field(default=False, description="是否返回全量清单（默认只回统计与前 15 条样本）"),
+) -> dict:
+    """MCP 工具入口 —— 弱关联候选干跑。"""
+    try:
+        return await mem.weak_links(
+            top_k=top_k, min_cosine=min_cosine,
+            auto_cosine=auto_cosine, degree_cap=degree_cap, full=full,
+        )
+    except Exception as e:
+        return {"error": f"(无法生成弱关联候选: {e})"}
+
+
+@mcp.tool(
     name="list_entities",
     description=(
         "分页列出实体，默认带 content，用于分批遍历全库判断过时。"

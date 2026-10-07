@@ -20,6 +20,22 @@ class Settings(BaseSettings):
     stale_days_warn: int = 90                # 过时预警阈值（天）
     stale_days_alert: int = 180              # 过时告警阈值（天）
 
+    # ── 弱关联候选（用向量补「相关」类无向弱关系）──
+    # 口径按 2772 条活跃实体的实测选定（2026-10-04）：
+    # 互为 top-10 且余弦 >=0.70 时，产出 5098 条边、平均度 3.68、最大度 12，
+    # 仍有 601 个节点孤立；0.60 档产出 35039 条、平均度 25.6，会把图冲垮。
+    weak_link_top_k: int = 10
+    weak_link_min_cosine: float = 0.70
+    # 余弦 >= 此值直接标为可自动写入；低于它但在 min_cosine 之上进待确认。
+    weak_link_auto_cosine: float = 0.75
+    # 度数上限：向量给不出语义，索引/总览类条目（正文开头在罗列子条目名，
+    # 而向量只吃正文前 400 字）会跟什么都像。不加上限时最高度可达数百。
+    weak_link_degree_cap: int = 12
+    # 疑似重复的判定口径（与 graph_health 的重复检测同源）：
+    # 命中即分流到重复清单，只建边不合并会把重复节点留着。
+    weak_link_dup_content_cosine: float = 0.75
+    weak_link_dup_name_similarity: float = 0.80
+
     # ── 意向抽词（把用户口语输入转成检索关键词，供意向检索的字面臂使用）──
     # 默认走本机 workboddy 代理，零额外费用。换模型只需改 .env 这三项。
     intent_extract_enabled: bool = True

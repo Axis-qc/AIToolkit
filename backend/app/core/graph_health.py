@@ -6,6 +6,7 @@
 因为实测名字相似度会把「AIToolkit前端架构 / AIToolkit后端架构」这类
 完全不同的事判成 0.92 相似。
 """
+import asyncio
 import json
 import math
 import re
@@ -62,35 +63,12 @@ def _name_similarity(a: str, b: str) -> float:
     return round(difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio(), 4)
 
 
-# ── 重复候选 ───────────────────────────────────────────
+def _scan_duplicate_pairs(docs, vectors, norms, high_th, watch_th):
+    """两两比对，返回 (high, watch) 两份候选清单。
 
-
-async def find_duplicate_candidates(limit: int | None = None) -> dict:
-    """以 content 为主信号找重复候选，输出高置信与待观察两档。
-
-    度量口径：字符二元组余弦相似度。选它是因为实测该口径下
-    三对真候选（航母核心技能对、AIToolkit 架构壳对、火力/防御核心对）
-    正好排在全局前三，而名字相似度会在同样阈值下带出大量无关项。
+    抽成独立同步函数是为了整体丢进 asyncio.to_thread：它不碰 SQLite 连接，
+    只读入参，线程里跑没有共享状态风险。见 find_duplicate_candidates。
     """
-    db = await _connect()
-    cur = await db.execute(
-        "SELECT name, type, content, importance, pinned FROM entities "
-        "WHERE deprecated_at IS NULL"
-    )
-    rows = await cur.fetchall()
-
-    docs = []
-    for r in rows:
-        content = (r["content"] or "").strip()
-        if content:
-            docs.append((r["name"], r["type"], content, r["importance"], bool(r["pinned"])))
-
-    high_th = settings.dup_similarity_threshold
-    watch_th = settings.dup_watch_threshold
-
-    vectors = [_n_grams(c) for _, _, c, _, _ in docs]
-    norms = [math.sqrt(sum(v * v for v in vec.values())) for vec in vectors]
-
     high: list[dict] = []
     watch: list[dict] = []
     for i in range(len(docs)):
@@ -127,6 +105,42 @@ async def find_duplicate_candidates(limit: int | None = None) -> dict:
             else:
                 item["tier"] = "watch"
                 watch.append(item)
+    return high, watch
+
+
+# ── 重复候选 ───────────────────────────────────────────
+
+
+async def find_duplicate_candidates(limit: int | None = None) -> dict:
+    """以 content 为主信号找重复候选，输出高置信与待观察两档。
+
+    度量口径：字符二元组余弦相似度。选它是因为实测该口径下
+    三对真候选（航母核心技能对、AIToolkit 架构壳对、火力/防御核心对）
+    正好排在全局前三，而名字相似度会在同样阈值下带出大量无关项。
+    """
+    db = await _connect()
+    cur = await db.execute(
+        "SELECT name, type, content, importance, pinned FROM entities "
+        "WHERE deprecated_at IS NULL"
+    )
+    rows = await cur.fetchall()
+
+    docs = []
+    for r in rows:
+        content = (r["content"] or "").strip()
+        if content:
+            docs.append((r["name"], r["type"], content, r["importance"], bool(r["pinned"])))
+
+    high_th = settings.dup_similarity_threshold
+    watch_th = settings.dup_watch_threshold
+
+    vectors = [_n_grams(c) for _, _, c, _, _ in docs]
+    norms = [math.sqrt(sum(v * v for v in vec.values())) for vec in vectors]
+
+    # 两两比对是 O(n²) 纯 Python，2351 条实测独占一个核 34 秒。必须放线程：
+    # 跑在事件循环上会让 uvicorn 单 worker 期间完全无响应（连 /api/health 都
+    # 排不上队），外部看门狗据此判定「卡死」并强杀进程——而进程本身是健康的。
+    high, watch = await asyncio.to_thread(_scan_duplicate_pairs, docs, vectors, norms, high_th, watch_th)
 
     high.sort(key=lambda x: x["similarity"], reverse=True)
     watch.sort(key=lambda x: x["similarity"], reverse=True)
