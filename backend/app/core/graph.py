@@ -5,11 +5,11 @@
 `from . import graph` 或 `from .graph import xxx`，无需任何改动。
 
 内部结构：
-  core/db.py             → DB 连接、init_db、close、cleanup_expired
-  core/graph_crud.py     → 实体/关系/事实 CRUD、软删除、恢复、合并、邻域查询、关系索引维护、pinned 实体查询
+  core/db.py             → DB 连接、init_db、close、cleanup_expired、实体历史裁剪
+  core/graph_crud.py     → 实体/关系/事实 CRUD、软删除、恢复、合并、邻域查询、关系索引维护、pinned 实体查询、历史快照与回滚
   core/embedding.py      → 本地嵌入模型（向量化），模型缓存限定在工作区内
   core/semantic_search.py → 纯向量语义检索（原始文本 → 全库余弦）
-  core/recall.py         → 意向检索（选择式选取 + 向量臂降级）
+  core/recall.py         → 实体向量的回填与自愈刷新
   core/weak_link.py      → 弱关联候选生成（干跑，用向量补「相关」类弱关系）
   core/graph_view.py     → 前端可视化专用查询（roots/children/facts/orphans/full_graph）
 """
@@ -24,6 +24,8 @@ from .db import (
     now_ts,
     parse_ts,
     retention_hours,
+    history_versions,
+    prune_entity_history,
     _connect,
 )
 
@@ -39,6 +41,9 @@ from .graph_crud import (
     list_entities_paged,
     set_stale_mark,
     batch_update_entities,
+    list_entity_history,
+    get_entity_history_version,
+    rollback_entity,
     create_fact,
     update_fact,
     get_fact_by_id,
@@ -72,9 +77,8 @@ from .semantic_search import (
     semantic_search,
 )
 
-# 意向检索（选择式选取 + 向量臂降级）
+# 实体向量回填与自愈刷新
 from .recall import (
-    recall,
     backfill,
     refresh_embeddings,
 )

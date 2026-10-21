@@ -144,8 +144,7 @@ AIToolkit/
 │       │   ├── graph_crud.py     # 实体/关系/事实 CRUD、软删除、合并、邻域 BFS、pinned 实体
 │       │   ├── embedding.py      # 本地 ONNX 嵌入模型（Qwen3-Embedding-0.6B，1024 维）
 │       │   ├── semantic_search.py # 纯向量语义检索（原始文本 → 全库余弦）
-│       │   ├── recall.py         # 意向检索（选择式选取 + 向量臂降级）
-│       │   ├── intent.py         # 选择式选取（把条目名当选项让模型挑）
+│       │   ├── recall.py         # 实体向量回填与自愈刷新
 │       │   ├── graph_view.py     # 前端可视化专用查询
 │       │   ├── memory.py         # 业务编排（直调 graph 子模块）
 │       │   ├── config.py         # pydantic-settings 配置（加载 .env）
@@ -243,26 +242,13 @@ AIToolkit/
 
 返回值：`list[dict]`，每个元素包含 `entity`、`type`、`importance`、`pinned`、`cosine`。模型不可用时返回带 `model_available: false` 的错误项，不返回空数组。
 
-### 3. `recall_for_turn`
+### 3. `backfill_embeddings`
 
-意向检索。接收用户原话，返回该轮真正相关的记忆实体，供对话开始前自动注入。与 `semantic_search` 的区别是它面向自动注入而非查询：服务端把图谱全部条目名作为选项交给模型挑选（选择式），挑中即直接返回；模型不可用时降级为只用原话走向量臂并套用线上阈值。
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `user_text` | string | 用户这一轮的原话（必填） |
-| `keywords` | string[]? | 留空（默认）表示由服务端自动选取；传空数组表示明确判定本轮无需检索（阈值提到最高档 0.60）；传非空数组无实际作用，会在 `intent.ignored_keywords` 里被标出 |
-| `top_k` | int | 返回结果数（默认 5） |
-| `with_diagnostics` | bool | 是否返回 `arms`（来源诊断信息，默认 true） |
-
-返回值：`list[dict]`，返回项带 `arms` 字段说明来源，首条带 `intent` 字段说明选取结果与失败原因。
-
-### 4. `backfill_embeddings`
-
-回填或刷新实体向量，供意向检索的语义臂使用。只对正文指纹变化的实体重算，因此可重复调用。无参数。
+回填或刷新实体向量，供语义检索使用。只对正文指纹变化的实体重算，因此可重复调用。无参数。
 
 返回值：`dict`，包含 `checked`、`updated`、`failed`、`skipped_empty` 统计。
 
-### 5. `save_to_graph`
+### 4. `save_to_graph`
 
 保存实体（含关系声明）和事实到知识图谱。关系嵌入在 `GraphNode.relations` 中，无需单独传参。
 
@@ -273,7 +259,7 @@ AIToolkit/
 | `importance` | int(1-10) | 重要度 |
 | `pinned` | bool | 是否固定注入 |
 
-### 6. `list_memory`
+### 5. `list_memory`
 
 分层浏览知识图谱。无参数时返回类型概览；传入 type 列出该类型下所有实体。
 
@@ -281,7 +267,7 @@ AIToolkit/
 |------|------|------|
 | `type` | string | （可选）实体类型，如 `User`/`AI`/`Project`。不传则返回类型概览 |
 
-### 7. `delete_from_graph`
+### 6. `delete_from_graph`
 
 软删除实体或事实。标记为作废，24 小时后自动物理删除，期间可用 `restore_memory` 恢复。
 
@@ -290,7 +276,7 @@ AIToolkit/
 | `target_type` | string | `entity` / `fact` / `fact_by_content` |
 | `target` | string | 目标标识 |
 
-### 8. `update_memory`
+### 7. `update_memory`
 
 **无需删除重建**，原地修改已有记忆。
 
@@ -301,7 +287,7 @@ AIToolkit/
 | `entity_importance` | 实体名称 | `importance`(1-10) |
 | `entity_pinned` | 实体名称 | `pinned`(true/false) |
 
-### 9. `merge_entities`
+### 8. `merge_entities`
 
 将源实体合并到目标实体：迁移所有关系、事实、属性，然后软删除源实体。
 
@@ -310,7 +296,7 @@ AIToolkit/
 | `source` | string | 源实体名称（合并后被删除） |
 | `target` | string | 目标实体名称（接收所有数据） |
 
-### 10. `restore_memory`
+### 9. `restore_memory`
 
 恢复已软删除的实体或事实。软删除后 24 小时内可恢复。
 
@@ -319,7 +305,7 @@ AIToolkit/
 | `target_type` | string | `entity`（按名称）/ `fact`（按 ID） |
 | `target` | string | 实体名称或事实数字 ID |
 
-### 11. `list_deprecated`
+### 10. `list_deprecated`
 
 列出所有已软删除待清理的实体和事实（24 小时后自动物理删除）。无参数。
 

@@ -70,6 +70,24 @@ async def health(
     return await graph.health_check(parsed)
 
 
+@router.get("/entities/history")
+async def entity_history(
+    name: str = Query(..., description="实体名称"),
+    version: int | None = Query(None, ge=1, description="看某一版全文，不传则只列摘要"),
+    limit: int | None = Query(None, ge=1, le=100, description="列摘要时最多返回几条"),
+):
+    """实体历史版本（只读）：就地修改的文本快照，用于误改后回溯。
+
+    不含向量；回滚走 MCP 工具 rollback_entity（前端本页只读）。
+    """
+    if version is None:
+        return {"name": name, "versions": await graph.list_entity_history(name, limit=limit)}
+    snap = await graph.get_entity_history_version(name, version)
+    if not snap:
+        return {"name": name, "version": version, "found": False}
+    return {"name": name, "found": True, **snap}
+
+
 @router.get("/weak-links")
 async def weak_links(
     top_k: int | None = Query(None, ge=1, le=100, description="每个实体取多少个最近邻作候选"),

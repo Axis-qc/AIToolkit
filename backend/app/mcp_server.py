@@ -169,7 +169,7 @@ async def get_entity(
     description=(
         "语义检索：把用户原始文本交给本地嵌入模型（Qwen3-Embedding-0.6B，1024 维），"
         "与全库实体向量算余弦，按相似度降序返回。不切词、不做字面包含匹配、不与其他臂融合。"
-        "与 recall_for_turn 的区别是它不过阈值、不截断，返回完整排序，"
+        "不过阈值、不截断，返回完整排序，"
         "既能当通用语义检索入口，也能用来检查召回效果。"
         "min_cosine 默认 0.0 表示不过滤；阈值档位随模型变过，换模型后需重新标定，"
         "不要沿用 bge 时代的 0.45/0.52/0.60。"
@@ -195,50 +195,9 @@ async def semantic_search(
 
 
 @mcp.tool(
-    name="recall_for_turn",
-    description=(
-        "意向检索：接收用户原话，返回该轮真正相关的记忆实体，供对话开始前自动注入。"
-        "与 semantic_search 的区别是它面向「自动注入」而非「查询」："
-        "服务端把图谱全部条目名作为选项交给模型挑选（选择式），挑中即直接返回；"
-        "模型不可用时降级为只用原话走向量臂并套用线上阈值。"
-        "keywords 一般不用传——留空即由服务端自动选取；"
-        "传空数组表示「明确判定本轮无需检索」（阈值提到最高档 0.60）；"
-        "传非空数组已无实际作用（字面检索引擎已删除，那些词没有消费者），"
-        "服务端会照常走向量检索并在返回的 intent.ignored_keywords 里如实标出。"
-        "返回项带 arms 字段说明来源，首条带 intent 字段说明选取结果与失败原因。"
-    )
-)
-async def recall_for_turn(
-    user_text: str = Field(description="用户这一轮的原话，服务端据此选取条目并做语义召回"),
-    keywords: list[str] | None = Field(
-        default=None,
-        description=(
-            "可选。留空（默认）表示由服务端自动选取；"
-            "传空数组表示明确判定本轮无需检索；"
-            "传非空数组无实际作用（字面引擎已删），会在 intent.ignored_keywords 里被标出"
-        ),
-    ),
-    top_k: int = Field(default=5, description="返回条数上限"),
-    with_diagnostics: bool = Field(default=True, description="是否返回 arms（来源诊断信息）"),
-) -> list[dict]:
-    """MCP 工具入口 —— 意向检索。
-
-    注意 keywords 默认必须是 None 而不是 []：FastMCP 在调用方不传该参数时
-    会填默认值，若默认是 []，recall() 会把它理解成「调用方明确判定无需检索」
-    从而跳过自动抽词（实测踩过：keywords_used 恒为空、抽词完全不生效）。
-    """
-    try:
-        return await mem.recall(
-            user_text, keywords=keywords, top_k=top_k, with_diagnostics=with_diagnostics
-        )
-    except Exception as e:
-        return [{"error": f"(无法意向检索: {e})"}]
-
-
-@mcp.tool(
     name="backfill_embeddings",
     description=(
-        "回填/刷新实体向量，供意向检索的语义臂使用。"
+        "回填/刷新实体向量，供语义检索使用。"
         "只对正文指纹变化的实体重算，因此可重复调用。"
         "返回 checked/updated/failed/skipped_empty 统计。"
     )
@@ -581,6 +540,51 @@ async def list_tombstones(
         return await mem.list_tombstones(kind=kind, limit=limit)
     except Exception as e:
         return f"(无法列出已清理内容: {e})"
+
+
+@mcp.tool(
+    name="entity_history",
+    description=(
+        "查看某个实体的历史版本（就地修改的文本快照，不含向量）。"
+        "给实体留最近若干版（默认 5，可在 .env 配 entity_history_versions），"
+        "改正文/改类型/改关系/改重要度/改名/写入覆盖都会先存一版。"
+        "不传 version 时列出各版摘要；传 version 时返回该版全文。"
+        "回滚用 rollback_entity。"
+    )
+)
+async def entity_history(
+    name: str = Field(description="实体名称"),
+    version: int | None = Field(default=None, description="要看全文的版本号，不传则只列摘要"),
+    limit: int | None = Field(default=None, description="列摘要时最多返回几条"),
+) -> str:
+    """MCP 工具入口 —— 查看实体历史版本。"""
+    try:
+        if version is None:
+            return await mem.list_history(name, limit=limit)
+        return await mem.get_history_version(name, version)
+    except Exception as e:
+        return f"(无法读取实体历史: {e})"
+
+
+@mcp.tool(
+    name="rollback_entity",
+    description=(
+        "把实体回滚到某一版历史快照。默认 dry_run=true 只出 diff 不写库，"
+        "确认后传 dry_run=false 执行。回滚前会把当前状态再存一版，"
+        "所以回滚本身可撤销。注意：facts 的归属不随回滚还原。"
+    )
+)
+async def rollback_entity(
+    name: str = Field(description="实体名称"),
+    version: int = Field(description="要回滚到的历史版本号（见 entity_history）"),
+    dry_run: bool = Field(default=True, description="默认只干跑出 diff，不写入"),
+    new_name: str | None = Field(default=None, description="回滚时顺带改成的名称，一般不用"),
+) -> str:
+    """MCP 工具入口 —— 回滚实体到历史版本。"""
+    try:
+        return await mem.rollback(name, version, dry_run=dry_run, new_name=new_name)
+    except Exception as e:
+        return f"(无法回滚实体: {e})"
 
 
 # ============================================================

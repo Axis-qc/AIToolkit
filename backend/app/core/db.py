@@ -66,6 +66,20 @@ def retention_hours() -> float:
     return hours if hours > 0 else 24.0
 
 
+def history_versions() -> int:
+    """每个实体保留的历史版本数，读配置，默认 5。
+
+    就地修改（改正文/类型/关系/属性）不像软删除那样有恢复通道，
+    快照是唯一回退点。只存文本字段，不含 embedding——
+    实测向量占库体积 27.8MB/35.9MB，跟着历史存会把代价放大几十倍。
+    """
+    try:
+        keep = int(settings.entity_history_versions)
+    except (TypeError, ValueError):
+        return 5
+    return keep if keep > 0 else 5
+
+
 def _ensure_dir():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -136,6 +150,26 @@ async def init_db():
             detail TEXT DEFAULT '{}',
             deprecated_at TEXT DEFAULT NULL,
             purged_at TEXT DEFAULT NULL
+        );
+        CREATE TABLE IF NOT EXISTS entity_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            changed_at TEXT NOT NULL,
+            change_kind TEXT DEFAULT '',
+            change_note TEXT DEFAULT '',
+            name_at_snapshot TEXT DEFAULT '',
+            type TEXT DEFAULT '',
+            content TEXT DEFAULT '',
+            relations TEXT DEFAULT '[]',
+            properties TEXT DEFAULT '{}',
+            importance INTEGER DEFAULT 1,
+            pinned INTEGER DEFAULT 0,
+            is_root INTEGER DEFAULT 0,
+            stale_marked_at TEXT DEFAULT NULL,
+            verified_until TEXT DEFAULT NULL,
+            created_at TEXT DEFAULT NULL,
+            updated_at TEXT DEFAULT NULL
         );
         CREATE TABLE IF NOT EXISTS conversations (
             id TEXT PRIMARY KEY,
@@ -223,6 +257,13 @@ async def init_db():
     try:
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_ri_dep ON relation_index(deprecated_at)
+        """)
+    except Exception:
+        pass
+    try:
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entity_history_name
+            ON entity_history(name, version DESC)
         """)
     except Exception:
         pass
@@ -321,7 +362,40 @@ async def cleanup_expired():
     await db.execute("DELETE FROM relation_index WHERE deprecated_at IS NOT NULL AND deprecated_at <= ?", (deadline,))
     await db.execute("DELETE FROM relations WHERE deprecated_at IS NOT NULL AND deprecated_at <= ?", (deadline,))
     await db.execute("DELETE FROM facts WHERE deprecated_at IS NOT NULL AND deprecated_at <= ?", (deadline,))
+    # 实体被物理清掉后，它的历史快照也没有回滚对象了，一并裁掉；
+    # 顺带把各实体超出版本上限的旧快照收掉（写入路径已即时裁，这里是兜底）。
+    await db.execute(
+        "DELETE FROM entity_history WHERE name NOT IN (SELECT name FROM entities)"
+    )
+    await prune_entity_history(db)
     await db.commit()
+
+
+async def prune_entity_history(db, name: str | None = None):
+    """把超过 history_versions() 的旧版本裁掉，每个实体只留最近 N 版。
+
+    在写入快照后、以及 cleanup_expired 收尾时各调一次，日常写入即时收敛，
+    不会等到下次重启才清理。传 name 时只裁该实体（写入路径用）。
+    """
+    keep = history_versions()
+    if name is not None:
+        await db.execute(
+            "DELETE FROM entity_history WHERE name=? AND version <= ("
+            "  SELECT MAX(version) FROM entity_history WHERE name=?"
+            ") - ?",
+            (name, name, keep),
+        )
+        return
+    await db.execute(
+        "DELETE FROM entity_history WHERE id NOT IN ("
+        "  SELECT id FROM ("
+        "    SELECT id, ROW_NUMBER() OVER ("
+        "      PARTITION BY name ORDER BY version DESC"
+        "    ) AS rn FROM entity_history"
+        "  ) WHERE rn <= ?"
+        ")",
+        (keep,),
+    )
 
 
 async def list_tombstones(kind: str | None = None, limit: int = 200) -> list[dict]:

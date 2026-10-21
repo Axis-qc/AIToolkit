@@ -4,7 +4,349 @@
 """
 import json
 
-from .db import _connect, cleanup_expired, now_ts
+from .db import _connect, cleanup_expired, history_versions, now_ts, prune_entity_history
+
+
+# ── 实体历史快照 ───────────────────────────────────────
+# 软删除有 deprecated_at + restore 可回退，合并也靠它。但改正文/改类型/
+# 改关系/改重要度这类就地修改原本没有任何回退点，只能手动 cp 数据库。
+# 这里在写入前存一份文本快照（不含 embedding），回滚走 rollback_entity。
+#
+# 快照在**改动生效前**存当前状态，语义是「被覆盖掉的那一版」；
+# 这样 version 1 是初始版本，回滚到 version N 得到的是第 N 次改动前的样子。
+
+_HISTORY_COLS = (
+    "type, content, relations, properties, importance, pinned, is_root, "
+    "stale_marked_at, verified_until, created_at, updated_at"
+)
+
+_HISTORY_TEXT_FIELDS = (
+    "type", "content", "relations", "properties", "importance", "pinned",
+    "is_root", "stale_marked_at", "verified_until", "created_at", "updated_at",
+)
+
+
+async def _snapshot_entity(db, name: str, kind: str, note: str = ""):
+    """把实体当前状态存为一版历史。必须在该实体的任何写入之前调用。
+
+    只存文本字段，不存 embedding：实测向量占库体积 27.8MB/35.9MB，
+    带向量存历史会让 5 版快照膨胀到 140MB，比重建一遍图还贵。
+    回滚后向量按需由 backfill_embeddings 重算。
+    """
+    row = await (await db.execute(
+        f"SELECT {_HISTORY_COLS} FROM entities WHERE name=?", (name,)
+    )).fetchone()
+    if not row:
+        return None
+
+    cur = await db.execute(
+        "SELECT COALESCE(MAX(version), 0) FROM entity_history WHERE name=?", (name,)
+    )
+    version = (await cur.fetchone())[0] + 1
+    await db.execute(
+        "INSERT INTO entity_history ("
+        "name, version, changed_at, change_kind, change_note, name_at_snapshot, "
+        + _HISTORY_COLS +
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            name, version, now_ts(), kind, note, name,
+            row["type"], row["content"], row["relations"], row["properties"],
+            row["importance"], row["pinned"], row["is_root"],
+            row["stale_marked_at"], row["verified_until"],
+            row["created_at"], row["updated_at"],
+        ),
+    )
+    await prune_entity_history(db, name)
+    return version
+
+
+async def list_entity_history(name: str, limit: int | None = None) -> list[dict]:
+    """列出实体的历史版本摘要（不含全文），新版本在前。
+
+    正文只给长度与首行摘要，避免 5 版全文把上下文撑爆；
+    要看全文用 get_entity_history_version。
+    """
+    db = await _connect()
+    keep = history_versions()
+    cap = min(limit or keep, 100)
+    cur = await db.execute(
+        "SELECT id, name, version, changed_at, change_kind, change_note, type, "
+        "LENGTH(content) AS content_len, content, importance, pinned, is_root, "
+        "created_at, updated_at "
+        "FROM entity_history WHERE name=? ORDER BY version DESC LIMIT ?",
+        (name, cap),
+    )
+    items = []
+    for r in await cur.fetchall():
+        content = r["content"] or ""
+        first_line = content.strip().splitlines()[0] if content.strip() else ""
+        items.append({
+            "version": r["version"],
+            "changed_at": r["changed_at"],
+            "change_kind": r["change_kind"],
+            "change_note": r["change_note"],
+            "type": r["type"],
+            "content_len": r["content_len"] or 0,
+            "content_head": first_line[:80],
+            "importance": r["importance"],
+            "pinned": bool(r["pinned"]),
+            "is_root": bool(r["is_root"]),
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+        })
+    return items
+
+
+async def get_entity_history_version(name: str, version: int) -> dict | None:
+    """读取某一版历史快照的全文。"""
+    db = await _connect()
+    cur = await db.execute(
+        f"SELECT id, name, version, changed_at, change_kind, change_note, "
+        f"name_at_snapshot, {_HISTORY_COLS} FROM entity_history "
+        f"WHERE name=? AND version=?",
+        (name, version),
+    )
+    row = await cur.fetchone()
+    if not row:
+        return None
+    item = {
+        "name": row["name"],
+        "version": row["version"],
+        "changed_at": row["changed_at"],
+        "change_kind": row["change_kind"],
+        "change_note": row["change_note"],
+        "name_at_snapshot": row["name_at_snapshot"] or row["name"],
+    }
+    for col in _HISTORY_TEXT_FIELDS:
+        item[col] = row[col]
+    item["relations"] = json.loads(item["relations"] or "[]")
+    item["properties"] = json.loads(item["properties"] or "{}")
+    item["pinned"] = bool(item["pinned"])
+    item["is_root"] = bool(item["is_root"])
+    return item
+
+
+def _diff_entity(current: dict | None, snapshot: dict) -> dict:
+    """对比当前状态与历史快照，列出回滚会改动的字段（只报有变化的）。"""
+    def _norm_json(value, fallback):
+        """DB 里存的是 JSON 字符串，快照已被解析成对象，比较前先拉平成同一种形态。"""
+        if value is None:
+            return fallback
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                return fallback
+        return value
+
+    changes = []
+    for field in _HISTORY_TEXT_FIELDS:
+        now_val = None if current is None else current.get(field)
+        old_val = snapshot.get(field)
+        if field in ("pinned", "is_root"):
+            # 布尔字段按真假比较：库里存 0/1，快照经 get_..._version 转成了
+            # bool。不归一化的话 False 与 0 会被判成有差异，干跑虚报改动。
+            if bool(now_val) != bool(old_val):
+                changes.append({"field": field, "current": bool(now_val), "target": bool(old_val)})
+            continue
+        if field == "importance":
+            if now_val != old_val:
+                changes.append({"field": field, "current": now_val, "target": old_val})
+            continue
+        if field in ("relations", "properties"):
+            # 两者都是 JSON 列，不解析就会因为「字符串 vs 对象」恒不相等而虚报改动
+            if _norm_json(now_val, [] if field == "relations" else {}) != \
+               _norm_json(old_val, [] if field == "relations" else {}):
+                changes.append({
+                    "field": field,
+                    "current": now_val,
+                    "target": old_val,
+                    "current_len": len(now_val or ""),
+                    "target_len": len(json.dumps(old_val, ensure_ascii=False)),
+                })
+            continue
+        if (now_val or "") != (old_val or ""):
+            changes.append({
+                "field": field,
+                "current": now_val,
+                "target": old_val,
+                "current_len": len(now_val or ""),
+                "target_len": len(old_val or ""),
+            })
+    return {
+        "exists": current is not None,
+        "changes": changes,
+        "changed_fields": [c["field"] for c in changes],
+    }
+
+
+def _same_json(a, b, fallback):
+    """比较两个 JSON 列是否等价（解析后比，忽略 dumps 的空格差异）。"""
+    def _p(v):
+        if v is None:
+            return fallback
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                return v
+        return v
+    return _p(a) == _p(b)
+
+
+def _validate_relations_payload(relations) -> tuple[str | None, list[str]]:
+    """校验一份 relations 负载能否安全写回。
+
+    返回 (致命错误, 警告列表)。致命错误表示快照结构已损坏、必须让用户先修；
+    警告表示可以继续回滚，但有个别条目会被索引跳过。
+
+    分两档的理由：回滚的价值就是「把正文救回来」，不能因为一条脏关系
+    就把整个回滚拒掉。缺失 name 键属于结构损坏（历史上会让索引重建抛
+    KeyError、留下半成品），要拦；name 为空只是产生一条无意义的悬空边，
+    交给 refresh_relation_index 跳过并如实报出来即可。
+    """
+    warnings: list[str] = []
+    if not isinstance(relations, list):
+        return f"快照里的 relations 不是列表（{type(relations).__name__}），拒绝回滚以免写坏索引", warnings
+    for i, rel in enumerate(relations):
+        if not isinstance(rel, dict):
+            return f"快照里的 relations[{i}] 不是对象，拒绝回滚以免写坏索引", warnings
+        if "name" not in rel:
+            return (f"快照里的 relations[{i}] 缺少 name 键，结构已损坏；"
+                    f"拒绝回滚以免留下「正文已改、索引未重建」的半成品。"
+                    f"可用 update_memory 先修好该条关系再回滚"), warnings
+        if not rel.get("name"):
+            warnings.append(
+                f"relations[{i}] 的 name 为空（{rel.get('name')!r}），"
+                f"该条不会写入关系索引（避免指向空名字的悬空边）")
+    return None, warnings
+
+
+async def rollback_entity(name: str, version: int, dry_run: bool = True,
+                          new_name: str | None = None) -> dict:
+    """把实体回滚到某一版历史快照。dry_run=True 时只出 diff，不写库。
+
+    回滚前先把当前状态再存一版，所以回滚本身也可回溯，不会把历史冲掉。
+    relations 变化后重建 relation_index，避免改名或改关系留下悬空边。
+    注意：facts.about_entities 的归属还原不做（fan-out 太大），
+    历史实体若改过名，事实关联停留在现名上，返回值里会说明。
+    """
+    db = await _connect()
+    snapshot = await get_entity_history_version(name, version)
+    if not snapshot:
+        return {
+            "ok": False,
+            "error": f"实体「{name}」没有第 {version} 版历史（版本可能已被裁到 "
+                     f"{history_versions()} 版以内）",
+        }
+
+    cur = await db.execute(
+        f"SELECT name, {_HISTORY_COLS} FROM entities WHERE name=?", (name,)
+    )
+    row = await cur.fetchone()
+    current = None
+    if row:
+        current = {col: row[col] for col in _HISTORY_TEXT_FIELDS}
+        current["name"] = row["name"]
+
+    # relations 的体检要在构造 result 之前做：干跑也要如实报出告警，
+    # 且 result 里要带上 warnings 字段。
+    rel_error, rel_warnings = _validate_relations_payload(snapshot["relations"])
+
+    diff = _diff_entity(current, snapshot)
+    # 改名也算一处待还原的差异：快照存时的名字与现名不同，说明改名发生在
+    # 这次快照之后，回滚要连名字一起改回去。干跑时如实报出来。
+    will_rename = (new_name or snapshot["name_at_snapshot"] or name) != name
+    if will_rename:
+        diff["changes"].insert(0, {
+            "field": "name",
+            "current": name,
+            "target": new_name or snapshot["name_at_snapshot"] or name,
+        })
+        diff["changed_fields"] = ["name"] + diff["changed_fields"]
+    result = {
+        "ok": True,
+        "name": name,
+        "version": version,
+        "snapshot_changed_at": snapshot["changed_at"],
+        "snapshot_kind": snapshot["change_kind"],
+        "dry_run": dry_run,
+        "diff": diff["changes"],
+        "changed_fields": diff["changed_fields"],
+        "restored_name": new_name or snapshot["name_at_snapshot"] or name,
+        "warnings": rel_warnings,
+        "note": "facts.about_entities 的归属不随回滚还原；若曾改名，事实仍挂在现名上。",
+    }
+    if dry_run or not diff["changes"]:
+        return result
+
+    target_name = new_name or snapshot["name_at_snapshot"] or name
+
+    # ── 写入前的全部前置校验，一个字节都不许先写 ──
+    # 教训：早先占用检查只看 deprecated_at IS NULL，漏掉「软删除但未物理清理」
+    # 的同名行，改名会撞 UNIQUE 约束抛 IntegrityError；而那时快照已写、未提交，
+    # 会在下一次任意写入时被顺带提交成一条根本没发生过的幽灵版本。
+    # 同理，relations 结构损坏会让索引重建在正文 update 之后才炸，留下半成品。
+    if rel_error:
+        result["ok"] = False
+        result["error"] = rel_error
+        return result
+
+    if target_name != name:
+        # 软删除行也占着主键（name 是 PRIMARY KEY，软删只是标记 deprecated_at），
+        # 所以这里必须不带 deprecated_at 条件地查，否则改名照样撞唯一约束。
+        check = await (await db.execute(
+            "SELECT deprecated_at FROM entities WHERE name=?", (target_name,)
+        )).fetchone()
+        if check:
+            if check["deprecated_at"] is None:
+                result["ok"] = False
+                result["error"] = (f"回滚需要把实体改回原名「{target_name}」，"
+                                   f"但该名称已被占用；可先改名腾出，或传 new_name 指定别的名称")
+            else:
+                result["ok"] = False
+                result["error"] = (f"回滚需要把实体改回原名「{target_name}」，但该名称被一条"
+                                   f"已软删除的实体占着（作废于 {check['deprecated_at']}）；"
+                                   f"name 是主键，软删行也占用它。先物理清理该行"
+                                   f"（等保留窗口过）或传 new_name 指定别的名称")
+            return result
+
+    # 到这里才允许落库：先存回滚前状态，再改名，最后写快照字段，一次 commit。
+    # 整段包在事务里，任何一步抛错都 rollback：_snapshot_entity 的 INSERT 在
+    # 提交前是挂起状态，若留着不管，会被下一次任意写入顺带提交成一条
+    # 「根本没发生过的回滚」幽灵历史（实测确认过这条路径）。
+    renamed = False
+    try:
+        await _snapshot_entity(db, name, "rollback", f"回滚到第 {version} 版")
+        if target_name != name:
+            await _rename_entity(db, name, target_name)
+            renamed = True
+
+        await db.execute(
+            "UPDATE entities SET type=?, content=?, relations=?, properties=?, "
+            "importance=?, pinned=?, is_root=?, stale_marked_at=?, verified_until=?, "
+            "updated_at=? WHERE name=?",
+            (
+                snapshot["type"], snapshot["content"],
+                json.dumps(snapshot["relations"], ensure_ascii=False),
+                json.dumps(snapshot["properties"], ensure_ascii=False),
+                snapshot["importance"], int(snapshot["pinned"]),
+                int(snapshot["is_root"]), snapshot["stale_marked_at"],
+                snapshot["verified_until"], now_ts(), target_name,
+            ),
+        )
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        result["ok"] = False
+        result["error"] = f"回滚失败并已整体回退（未留下半成品）：{type(e).__name__}: {e}"
+        return result
+
+    # relations 或改名都会影响索引，统一重建，避免留下悬空边
+    await refresh_relation_index(target_name)
+    result["restored_name"] = target_name
+    result["renamed"] = renamed
+    return result
 
 
 # ── 实体 CRUD ───────────────────────────────────────────
@@ -24,10 +366,25 @@ async def upsert_entity(
     props_json = json.dumps(props or {}, ensure_ascii=False)
 
     # 检查是否存在——决定 created_at
-    cur = await db.execute("SELECT name FROM entities WHERE name=?", (name,))
-    exists = await cur.fetchone() is not None
+    cur = await db.execute(
+        "SELECT type, content, relations, properties, is_root FROM entities WHERE name=?", (name,)
+    )
+    row = await cur.fetchone()
+    exists = row is not None
 
     if exists:
+        # 同值重放不存快照。save() 每次都调 upsert_entity，重放同一份内容
+        # 若照样各存一版，N 版额度会被同一份内容吃满，把真正需要的那版
+        # （含原始正文的）挤出窗口，回滚就再也回不到改动前了（实测确认）。
+        if not (
+            etype == row["type"]
+            and (content or "") == (row["content"] or "")
+            and _same_json(relations_json, row["relations"], [])
+            and _same_json(props_json, row["properties"], {})
+            and int(is_root) == int(row["is_root"] or 0)
+        ):
+            # 覆盖写入会丢掉旧正文，先存快照再改
+            await _snapshot_entity(db, name, "upsert", "写入覆盖")
         await db.execute(
             "UPDATE entities SET type=?, content=?, relations=?, properties=?, is_root=?, updated_at=? WHERE name=?",
             (etype, content, relations_json, props_json, int(is_root), now, name),
@@ -42,6 +399,68 @@ async def upsert_entity(
 
     # 自动维护关系索引
     await refresh_relation_index(name)
+
+
+async def _rename_entity(db, old_name: str, new_name: str, overrides: dict | None = None):
+    """把实体从 old_name 改名到 new_name，并同步所有按名字索引的关联数据。
+
+    调用方负责占用检查与 commit。改名用 INSERT 新行 + DELETE 旧行，
+    因为 name 是主键不能 UPDATE。列清单从表的实际列动态取，
+    避免新增实体列时漏掉而静默清空（此前 embedding/stale 标注就被漏过）。
+    """
+    overrides = overrides or {}
+    cur_cols = await db.execute("PRAGMA table_info(entities)")
+    copied = [r[1] for r in await cur_cols.fetchall() if r[1] != "name"]
+    select_parts: list[str] = []
+    select_params: list = []
+    for col in copied:
+        if col in overrides:
+            select_parts.append("?")
+            select_params.append(overrides[col])
+        else:
+            select_parts.append(col)
+
+    await db.execute(
+        f"INSERT INTO entities (name, {', '.join(copied)}) "
+        f"SELECT ?, {', '.join(select_parts)} FROM entities WHERE name=?",
+        (new_name, *select_params, old_name),
+    )
+    await db.execute("DELETE FROM entities WHERE name=?", (old_name,))
+
+    # relation_index：出边 + 入边
+    await db.execute(
+        "UPDATE relation_index SET entity_name=? WHERE entity_name=?", (new_name, old_name)
+    )
+    await db.execute(
+        "UPDATE relation_index SET target_name=? WHERE target_name=?", (new_name, old_name)
+    )
+
+    # facts.about_entities JSON 替换
+    cur_facts = await db.execute(
+        "SELECT id, about_entities FROM facts WHERE deprecated_at IS NULL"
+    )
+    for frow in await cur_facts.fetchall():
+        about = json.loads(frow["about_entities"])
+        if old_name in about:
+            new_about = json.dumps(list(set(
+                new_name if x == old_name else x for x in about
+            )), ensure_ascii=False)
+            await db.execute(
+                "UPDATE facts SET about_entities=? WHERE id=?", (new_about, frow["id"])
+            )
+
+    # conversation_mentions
+    await db.execute(
+        "UPDATE conversation_mentions SET entity_name=? WHERE entity_name=?",
+        (new_name, old_name),
+    )
+
+    # 历史快照跟着改名走。entity_history 按 name 索引，不跟着改名的话
+    # 旧实体的历史会变成无人认领的孤儿，回滚时查不到任何版本。
+    # name_at_snapshot 保留存快照时的原名，回滚到改名之前才能把名字改回去。
+    await db.execute(
+        "UPDATE entity_history SET name=? WHERE name=?", (new_name, old_name)
+    )
 
 
 async def update_entity(
@@ -82,6 +501,9 @@ async def update_entity(
         if check:
             raise ValueError(f"目标名称「{new_name}」已被其他实体占用")
 
+        # 改名前的旧状态存一版，改错了能回滚回来
+        await _snapshot_entity(db, name, "rename", f"改名为「{new_name}」")
+
         # 1. 主表改名（INSERT 新行 + DELETE 旧行，因为 PRIMARY KEY 不可 UPDATE）
         # 注意：这里是显式列清单，新增实体列必须同步加进来。此前的清单漏了
         # stale_marked_at / verified_until / embedding，会导致改名时这些列被
@@ -92,53 +514,9 @@ async def update_entity(
         if rename_is_root is not None:
             overrides["is_root"] = rename_is_root
 
-        cur_cols = await db.execute("PRAGMA table_info(entities)")
-        copied = [r[1] for r in await cur_cols.fetchall() if r[1] != "name"]
-        select_parts: list[str] = []
-        select_params: list = []
-        for col in copied:
-            if col in overrides:
-                select_parts.append("?")
-                select_params.append(overrides[col])
-            else:
-                select_parts.append(col)
-
-        await db.execute(
-            f"INSERT INTO entities (name, {', '.join(copied)}) "
-            f"SELECT ?, {', '.join(select_parts)} FROM entities WHERE name=?",
-            (new_name, *select_params, name),
-        )
-        await db.execute("DELETE FROM entities WHERE name=?", (name,))
-
-        # 2. relation_index：出边 entity_name
-        await db.execute(
-            "UPDATE relation_index SET entity_name=? WHERE entity_name=?",
-            (new_name, name),
-        )
-        # 3. relation_index：入边 target_name
-        await db.execute(
-            "UPDATE relation_index SET target_name=? WHERE target_name=?",
-            (new_name, name),
-        )
-        # 4. facts.about_entities JSON 替换
-        cur_facts = await db.execute(
-            "SELECT id, about_entities FROM facts WHERE deprecated_at IS NULL"
-        )
-        for frow in await cur_facts.fetchall():
-            about = json.loads(frow["about_entities"])
-            if name in about:
-                new_about = json.dumps(list(set(
-                    new_name if x == name else x for x in about
-                )), ensure_ascii=False)
-                await db.execute(
-                    "UPDATE facts SET about_entities=? WHERE id=?",
-                    (new_about, frow["id"]),
-                )
-        # 5. conversation_mentions
-        await db.execute(
-            "UPDATE conversation_mentions SET entity_name=? WHERE entity_name=?",
-            (new_name, name),
-        )
+        # 改名本体 + 所有按名字索引的关联数据，统一走 _rename_entity，
+        # 保证与回滚改名走的是同一套逻辑（含历史快照跟着改名）
+        await _rename_entity(db, name, new_name, overrides)
         await db.commit()
 
         # 改名后索引重建用新名称
@@ -147,6 +525,17 @@ async def update_entity(
 
     # ── 普通更新（不改名）──
     is_root = int(new_is_root) if new_is_root is not None else row["is_root"]
+    # 全传 None 的调用（memory.update 用它当存在性检查）不该占一格历史额度，
+    # 只在真的有字段变化时才存快照。比较前先归一化，避免 None/'[]' 这类假差异。
+    changed = (
+        etype != row["type"]
+        or (content or "") != (row["content"] or "")
+        or (relations_json or "[]") != (row["relations"] or "[]")
+        or (props or "{}") != (row["properties"] or "{}")
+        or int(is_root) != int(row["is_root"] or 0)
+    )
+    if changed:
+        await _snapshot_entity(db, name, "update", "就地修改")
     await db.execute(
         "UPDATE entities SET type=?, content=?, relations=?, properties=?, is_root=?, updated_at=? WHERE name=?",
         (etype, content, relations_json, props, is_root, now, name),
@@ -382,9 +771,11 @@ async def batch_update_entities(
     for name in dict.fromkeys(names):
         db = await _connect()
         cur = await db.execute(
-            "SELECT name FROM entities WHERE name=? AND deprecated_at IS NULL", (name,)
+            "SELECT type, importance, stale_marked_at, verified_until FROM entities "
+            "WHERE name=? AND deprecated_at IS NULL", (name,)
         )
-        if not await cur.fetchone():
+        row = await cur.fetchone()
+        if not row:
             missing.append(name)
             continue
 
@@ -395,26 +786,53 @@ async def batch_update_entities(
 
         sets: list[str] = []
         params: list = []
+        requested: list[tuple[str, object]] = []   # 用于同值判定
         if new_type is not None:
             sets.append("type=?")
             params.append(new_type)
+            requested.append(("type", new_type))
         if clear_stale:
             sets.append("stale_marked_at=NULL")
             sets.append("verified_until=NULL")
+            requested.append(("stale_marked_at", None))
+            requested.append(("verified_until", None))
         else:
             if stale_marked_at is not None:
+                mark = stale_marked_at or now_ts()
                 sets.append("stale_marked_at=?")
-                params.append(stale_marked_at or now_ts())
+                params.append(mark)
+                requested.append(("stale_marked_at", mark))
             if verified_until is not None:
                 sets.append("verified_until=?")
                 params.append(verified_until)
+                requested.append(("verified_until", verified_until))
         if importance is not None:
+            imp = max(1, min(int(importance), 10))
             sets.append("importance=?")
-            params.append(max(1, min(int(importance), 10)))
+            params.append(imp)
+            requested.append(("importance", imp))
 
         if not sets:
             missing.append(name)
             continue
+
+        # 同值不写、不存快照。整理常对同一批反复下发同一条指令，每次都存快照
+        # 会把 N 版额度吃满，把含原始正文的那版挤出窗口（实测确认）。
+        if all(row[field] == value for field, value in requested):
+            applied.append(name)      # 结果已符合要求，算执行成功但不占额度
+            continue
+
+        # 批量改类型/标注/重要度同样是就地覆盖，逐条存快照，改错了能按实体回滚
+        note_parts = []
+        if new_type is not None:
+            note_parts.append(f"类型→{new_type}")
+        if importance is not None:
+            note_parts.append(f"重要度→{importance}")
+        if clear_stale:
+            note_parts.append("清过时标注")
+        elif stale_marked_at is not None or verified_until is not None:
+            note_parts.append("打过时标注")
+        await _snapshot_entity(db, name, "batch", "批量整理：" + "、".join(note_parts))
 
         sets.append("updated_at=?")
         params.append(now_ts())
@@ -458,6 +876,11 @@ async def refresh_relation_index(entity_name: str):
     # 4. 插入新索引
     relations_list = json.loads(row["relations"] or "[]")
     for rel in relations_list:
+        # 名字为空的关系写进去就是一条指向 '' 的悬空边，查询侧 JOIN 不到、
+        # 前端也渲染不出来，只会污染体检的悬空清单。这里统一挡掉，
+        # 让所有写入路径（含回滚）都不必各自防一遍。
+        if not isinstance(rel, dict) or not rel.get("name"):
+            continue
         await db.execute(
             "INSERT OR IGNORE INTO relation_index "
             "(entity_name, target_name, rel_type, deprecated_at) "

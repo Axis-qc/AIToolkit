@@ -23,31 +23,6 @@ async def list_pinned() -> list[dict]:
     return await graph.get_pinned_entities()
 
 
-async def recall(
-    user_text: str,
-    keywords: list[str] | None = None,
-    top_k: int = 5,
-    with_diagnostics: bool = True,
-    auto_extract: bool = True,
-) -> list[dict]:
-    """意向检索：接收用户原话，返回该轮相关的记忆实体。
-
-    与 semantic_search 的区别：semantic_search 是纯向量、不过阈值、按余弦
-    原样返回，适合排查与实验；recall 是自动注入通道，主路径由服务端把全部
-    条目名交给模型挑（选择式），不可用时降级为只用原话走向量臂并套用线上阈值。
-
-    keywords 传 None 且 auto_extract=True 时走选择式；传空数组表示「明确判定
-    无需检索」，向量臂按最高档阈值放行；传非空数组已无消费者（字面臂已删）。
-    """
-    return await graph.recall(
-        user_text,
-        keywords=keywords,
-        top_k=top_k,
-        with_diagnostics=with_diagnostics,
-        auto_extract=auto_extract,
-    )
-
-
 async def backfill_embeddings() -> dict:
     """回填实体向量。指纹未变的实体会被跳过，可重复调用。"""
     return await graph.backfill()
@@ -438,7 +413,6 @@ async def update(target_type: str, target: str, updates: dict) -> str:
 
 async def merge(source: str, target: str, preview: bool = False) -> str:
     """将源实体合并到目标实体。
-
     preview=True 时只干跑，返回会迁走哪些关系、哪些事实、属性有无冲突，不落库。
     正式执行时走的也是同一份计划，保证预览与执行一致。
     """
@@ -490,4 +464,94 @@ def _format_merge_preview(plan: dict) -> str:
     if plan["pinned_after"] and not plan["target"]["pinned"]:
         lines.append("固定状态：源实体已固定，目标将变为固定")
     lines.append(f"最后一步：软删除源实体「{plan['source']['name']}」")
+    return "\n".join(lines)
+
+
+# ── 实体历史与回滚 ──────────────────────────────────────
+
+
+async def list_history(name: str, limit: int | None = None) -> str:
+    """列出某个实体的历史版本摘要（不含全文）。"""
+    versions = await graph.list_entity_history(name, limit=limit)
+    if not versions:
+        return (f"实体「{name}」没有历史版本。"
+                f"新实体要改过一次之后才会有快照（每实体保留最近 "
+                f"{graph.history_versions()} 版）。")
+    lines = [f"实体「{name}」的历史版本（保留最近 {graph.history_versions()} 版，新→旧）："]
+    for v in versions:
+        head = v["content_head"] or "（正文为空）"
+        lines.append(
+            f"- v{v['version']}　{v['changed_at']}　[{v['change_kind']}] {v['change_note']}\n"
+            f"    type={v['type']}　正文 {v['content_len']} 字　重要度 {v['importance']}"
+            f"{'　固定' if v['pinned'] else ''}{'　根节点' if v['is_root'] else ''}\n"
+            f"    {head}"
+        )
+    lines.append("看全文用 get_entity_history(name, version)；回滚用 rollback_entity(name, version)。")
+    return "\n".join(lines)
+
+
+async def get_history_version(name: str, version: int) -> str:
+    """读取某一版历史快照的全文。"""
+    snap = await graph.get_entity_history_version(name, version)
+    if not snap:
+        return (f"实体「{name}」没有第 {version} 版历史（可能已被裁到最近 "
+                f"{graph.history_versions()} 版之内）。")
+    rels = snap["relations"]
+    lines = [
+        f"实体「{name}」第 {version} 版（存于 {snap['changed_at']}，"
+        f"改动类型 {snap['change_kind']}：{snap['change_note']}）",
+        f"type: {snap['type']}",
+        f"importance: {snap['importance']}　pinned: {snap['pinned']}　is_root: {snap['is_root']}",
+        f"created_at: {snap['created_at']}　updated_at: {snap['updated_at']}",
+        f"stale_marked_at: {snap['stale_marked_at']}　verified_until: {snap['verified_until']}",
+        f"relations（{len(rels)} 条）:",
+    ]
+    for r in rels:
+        if isinstance(r, dict):
+            lines.append(f"  - {r.get('name')}（{r.get('rel', '')}）")
+        else:
+            lines.append(f"  - {r}")
+    props = snap["properties"]
+    if props:
+        lines.append(f"properties（{len(props)} 项）:")
+        for k, v in props.items():
+            lines.append(f"  - {k} = {v}")
+    lines.append("content:")
+    lines.append(snap["content"] or "（空）")
+    return "\n".join(lines)
+
+
+async def rollback(name: str, version: int, dry_run: bool = True,
+                   new_name: str | None = None) -> str:
+    """把实体回滚到某一版历史。默认干跑，只出 diff；dry_run=False 才写入。
+
+    回滚前会把当前状态再存一版，因此回滚本身也可回溯。
+    """
+    result = await graph.rollback_entity(name, version, dry_run=dry_run, new_name=new_name)
+    if not result.get("ok"):
+        return f"错误：{result.get('error')}"
+
+    head = (f"回滚{'干跑' if dry_run else '执行'}：实体「{name}」→ 第 {version} 版"
+            f"（该版存于 {result['snapshot_changed_at']}，"
+            f"改动类型 {result['snapshot_kind']}）")
+    changes = result["diff"]
+    if not changes:
+        return head + "\n当前状态与该版完全一致，无需改动。"
+
+    lines = [head, f"会改动 {len(changes)} 个字段："]
+    for c in changes:
+        field = c["field"]
+        if field in ("content", "relations", "properties"):
+            lines.append(
+                f"- {field}：{c.get('current_len', 0)} 字 → {c.get('target_len', 0)} 字"
+            )
+        else:
+            lines.append(f"- {field}：{c['current']!r} → {c['target']!r}")
+    lines.append(result["note"])
+    for w in result.get("warnings") or []:
+        lines.append(f"注意：{w}")
+    if dry_run:
+        lines.append("以上为干跑，未写入。确认后传 dry_run=false 执行。")
+    else:
+        lines.append("已写入。回滚前的状态已存为新的一版历史，如需撤销可再回滚到该版。")
     return "\n".join(lines)
