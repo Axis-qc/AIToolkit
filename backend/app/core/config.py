@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     weak_link_dup_content_cosine: float = 0.75
     weak_link_dup_name_similarity: float = 0.80
 
+    # ── 自我文档目录 ──
+    # 表达倾向、用户认知、分歧、未解问题四份 markdown 所在目录。DSH 插件直接读
+    # 这些文件注入系统提示词，MCP 只负责写入。相对路径按仓库根解析。
+    self_docs_dir: str = "self"
+
     @property
     def whitelist_paths(self) -> list[str]:
         paths = [str(ROOT.parent)]

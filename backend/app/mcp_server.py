@@ -20,6 +20,7 @@ from starlette.types import Receive, Scope, Send
 
 from app.core import memory as mem
 from app.core import desktop
+from app.core import self_doc
 
 logger = logging.getLogger(__name__)
 
@@ -704,3 +705,70 @@ async def type_text(
             return {"error": f"输入失败: {e}"}
 
     return await anyio.to_thread.run_sync(_type)
+
+
+# ============================================================
+# 自我文档 —— 表达倾向、用户认知、分歧、未解问题
+# ============================================================
+# 四份 markdown 由 DSH 插件每轮直接读取注入系统提示词，这里只负责写入与校验。
+# 单段超上限直接拒绝，不截断：截断会让调用方以为写成功，实际内容已残缺。
+
+_SELF_DOC_CHOICES = 'style / user / disagreements / open_questions'
+
+
+@mcp.tool(
+    name="self_read",
+    description=(
+        "读取自我文档。不传 doc 返回四份全文与各自字数、上限；传 doc 只返回该份。"
+        f"可选 {_SELF_DOC_CHOICES}。"
+    )
+)
+async def self_read(
+    doc: str | None = Field(
+        default=None,
+        description=f"文档名，可选 {_SELF_DOC_CHOICES}；留空返回全部",
+    ),
+) -> dict:
+    """MCP 工具入口 —— 读取自我文档。"""
+    try:
+        return self_doc.read_docs(doc)
+    except self_doc.SelfDocError as e:
+        return {"error": str(e)}
+
+
+@mcp.tool(
+    name="self_append",
+    description=(
+        "向自我文档追加一条。只有 disagreements（我说过不的时刻）与 "
+        "open_questions（未解问题）可追加，style 与 user 都不可追加，只可整段替换。"
+        "条目不能以 # 开头。单段超过上限会被拒绝，需先精简旧条目。"
+    )
+)
+async def self_append(
+    doc: str = Field(description="文档名，可选 disagreements / open_questions"),
+    entry: str = Field(description="要追加的条目正文"),
+) -> dict:
+    """MCP 工具入口 —— 追加自我文档条目。"""
+    try:
+        return self_doc.append_entry(doc, entry)
+    except self_doc.SelfDocError as e:
+        return {"error": str(e)}
+
+
+@mcp.tool(
+    name="self_update",
+    description=(
+        "整段替换自我文档。传空字符串表示清空该段。"
+        "写入前会把旧内容存进历史快照（同一天同一文档只留最后一次）。"
+        f"单段超过上限会被拒绝。可选 {_SELF_DOC_CHOICES}。"
+    )
+)
+async def self_update(
+    doc: str = Field(description=f"文档名，可选 {_SELF_DOC_CHOICES}"),
+    content: str = Field(description="新的整段内容，空字符串表示清空"),
+) -> dict:
+    """MCP 工具入口 —— 整段替换自我文档。"""
+    try:
+        return self_doc.update_doc(doc, content)
+    except self_doc.SelfDocError as e:
+        return {"error": str(e)}
